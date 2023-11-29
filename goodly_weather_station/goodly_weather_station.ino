@@ -20,20 +20,18 @@
 #define STEPS (315*3)
 
 // For motors connected to digital pins 4,5,6,7
-SwitecX25 motor1(STEPS,9,7,5,3);
+//SwitecX25 motor1(STEPS,9,7,5,3);
+SwitecX25 *motor1;
 
 void setup(void)
 {
-  // Setting pin mode in SwitecX25 constructor does not work
-  pinMode(9, OUTPUT);
-  pinMode(7, OUTPUT);
-  pinMode(5, OUTPUT);
-  pinMode(3, OUTPUT);
+  // Setting pin mode in SwitecX25 constructor before setup() does not work
+  motor1 = new SwitecX25(STEPS, 9, 7, 5, 3);
 
   // run the motor against the stops
-  motor1.zero();
+  motor1->zero();
   // start moving towards the center of the range
-  motor1.setPosition(STEPS/2);
+  motor1->setPosition(STEPS/2);
   
   Serial.begin(9600);
   Serial.print("Enter a step position from 0 through ");
@@ -45,12 +43,12 @@ void loop(void)
 {
   static int nextPos = 0;
   // the motor only moves when you call update
-  motor1.update();
+  motor1->update();
   
   if (Serial.available()) {
     char c = Serial.read();
     if (c==10 || c==13) {
-      motor1.setPosition(nextPos);
+      motor1->setPosition(nextPos);
       nextPos = 0;
     } else if (c>='0' && c<='9') {
       nextPos = 10*nextPos + (c-'0');
