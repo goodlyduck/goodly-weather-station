@@ -14,6 +14,24 @@
 #include "src/SwitecX25/SwitecX25.h"
 
 
+// PINS
+#define PIN_SPI_MOSI   3
+#define PIN_SPI_MISO   9
+#define PIN_SPI_CLK   2
+#define PIN_SPI_DC    5
+#define PIN_SPI_CS_OLED  6
+#define PIN_SPI_CS_SDCARD 8
+#define PIN_OLED_RESET 4
+#define PIN_DHT 7
+#define MOTOR1_PIN1 7
+#define MOTOR1_PIN2 8
+#define MOTOR1_PIN3 9
+#define MOTOR1_PIN4 10
+
+#define PIN_ENCODER_CLK A1
+#define PIN_ENCODER_DT A2
+#define PIN_ENCODER_SW A3 
+
 // USER DEFINES
 #define DISPLAY_OFF_SEC 10
 
@@ -30,7 +48,8 @@ volatile unsigned long last_input_millis;
 
 
 // DHT11 TEMP AND HUMIDITY SENSOR
-DHT11 dht11(7); // Pin D7
+
+DHT11 dht11(PIN_DHT);
 int dht_temperature;
 int dht_humidity_rel;
 
@@ -44,10 +63,6 @@ float bmp_pressure;
 // STEPPER MOTOR DEFINES
 // standard X25.168 range 315 degrees at 1/3 degree steps
 #define STEPS (315*3)
-#define MOTOR1_PIN1 7
-#define MOTOR1_PIN2 8
-#define MOTOR1_PIN3 9
-#define MOTOR1_PIN4 10
 //SwitecX25 motor1(STEPS,9,7,5,3);
 SwitecX25 *motor1;
 
@@ -57,20 +72,15 @@ SwitecX25 *motor1;
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 /*
 //OLED display hardware SPI
-#define OLED_DC     6
-#define OLED_CS     7
-#define OLED_RESET  8
+#define PIN_SPI_DC     6
+#define PIN_SPI_CS_OLED     7
+#define PIN_OLED_RESET  8
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
-  &SPI, OLED_DC, OLED_RESET, OLED_CS);
+  &SPI, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
 */
 // OLED display software SPI
-#define OLED_MOSI   3
-#define OLED_CLK   2
-#define OLED_DC    5
-#define OLED_CS    6
-#define OLED_RESET 4
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
-  OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
+  PIN_SPI_MOSI, PIN_SPI_CLK, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
 bool display_on;
 
 void setup()
@@ -78,15 +88,12 @@ void setup()
   Serial.begin(9600);
 
   // ROTARY ENCODER INTERRUPT
-  #define ENCODER_CLK A1
-  #define ENCODER_DT A2
-  #define ENCODER_SW A3 
-  pinMode(ENCODER_CLK, INPUT);
-  pinMode(ENCODER_DT, INPUT);
-  pinMode(ENCODER_SW, INPUT_PULLUP);
-  attachInterrupt(ENCODER_CLK, encoder_clock, CHANGE);
-  attachInterrupt(ENCODER_SW, encoder_push, RISING);
-  encoder_clock_prev = digitalRead(ENCODER_CLK);
+  pinMode(PIN_ENCODER_CLK, INPUT);
+  pinMode(PIN_ENCODER_DT, INPUT);
+  pinMode(PIN_ENCODER_SW, INPUT_PULLUP);
+  attachInterrupt(PIN_ENCODER_CLK, encoder_clock, CHANGE);
+  attachInterrupt(PIN_ENCODER_SW, encoder_push, RISING);
+  encoder_clock_prev = digitalRead(PIN_ENCODER_CLK);
 
   // BMP180 INIT
   /* Initialise the sensor */
@@ -249,9 +256,9 @@ void printSensorReadings() {
 
 void encoder_clock() {
   //if (millis() - last_input_millis < ENCODER_DEBOUNCE_MILLIS)
-  bool encoder_clock = digitalRead(ENCODER_CLK);
+  bool encoder_clock = digitalRead(PIN_ENCODER_CLK);
   if (encoder_clock != encoder_clock_prev) {
-    bool encoder_dt = digitalRead(ENCODER_DT);
+    bool encoder_dt = digitalRead(PIN_ENCODER_DT);
     if (encoder_dt != encoder_clock) {
       //encoder_cw_pressed = true;
       encoder_position++;
@@ -282,9 +289,9 @@ void displayEncoderReadings() {
   display.display();
   delay(1000);  
   for (;;) {
-    CLK = digitalRead(ENCODER_CLK);
-    DT = digitalRead(ENCODER_DT);
-    SW = digitalRead(ENCODER_SW);
+    CLK = digitalRead(PIN_ENCODER_CLK);
+    DT = digitalRead(PIN_ENCODER_DT);
+    SW = digitalRead(PIN_ENCODER_SW);
     display.clearDisplay();
     display.setCursor(0, 0);
     display.println("Hej");
