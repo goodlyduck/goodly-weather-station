@@ -4,6 +4,7 @@
 
 //----------------------------------------------------------------------
 
+//#include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <DHT11.h>
@@ -14,47 +15,56 @@
 #include "src/SwitecX25/SwitecX25.h"
 
 
-// PINS
-#define PIN_SPI_MOSI   3
-#define PIN_SPI_MISO   9
-#define PIN_SPI_CLK   2
-#define PIN_SPI_DC    5
-#define PIN_SPI_CS_OLED  6
-#define PIN_SPI_CS_SDCARD 8
-#define PIN_OLED_RESET 4
-#define PIN_DHT 7
-#define MOTOR1_PIN1 7
-#define MOTOR1_PIN2 8
-#define MOTOR1_PIN3 9
-#define MOTOR1_PIN4 10
+// STATES
+enum displayState {
+  OFF,
+  SENSORS,
+  MENU
+};
 
-#define PIN_ENCODER_CLK A1
-#define PIN_ENCODER_DT A2
-#define PIN_ENCODER_SW A3 
+// PINS
+//#define PIN_SPI_MOSI   3
+//#define PIN_SPI_MISO   9
+//#define PIN_SPI_CLK   2
+#define PIN_SPI_DC 9
+#define PIN_SPI_CS_OLED 10
+#define PIN_SPI_CS_SD 7
+#define PIN_OLED_RESET 8
+#define PIN_DHT 6
+#define MOTOR1_PIN1 A0
+#define MOTOR1_PIN2 A1
+#define MOTOR1_PIN3 A2
+#define MOTOR1_PIN4 A3
+
+#define PIN_ENCODER_CLK 5
+#define PIN_ENCODER_DT 4
+#define PIN_ENCODER_SW 3 
+
 
 // USER DEFINES
-#define DISPLAY_OFF_SEC 10
-
+#define DISPLAY_OFF_SEC 20
+#define SENSOR_READ_INTERV_SEC 5
+#define ENCODER_DEBOUNCE_MILLIS 5
 
 // ROTARY ENCODER PUSH BUTTON
 //detachInterrupt(GPIOPin);
 volatile bool encoder_clock_prev;
-volatile bool encoder_cw_pressed;
-volatile bool encoder_ccw_pressed;
-volatile bool encoder_push_pressed;
+volatile bool encoder_cw_pressed = false;
+volatile bool encoder_ccw_pressed = false;
+volatile bool encoder_push_pressed = false;
 volatile int encoder_position = 0;
-volatile unsigned long last_input_millis;
-#define ENCODER_DEBOUNCE_MILLIS 5
 
+// USER VARIABLES
+volatile unsigned long lastInputMillis = millis();
+unsigned long lastSensorReadMillis = 0;
 
 // DHT11 TEMP AND HUMIDITY SENSOR
-
 DHT11 dht11(PIN_DHT);
 int dht_temperature;
 int dht_humidity_rel;
 
 
-// BMP180 PRESSURE SENSOR (DEFAULT PINS A4, A5)
+// BMP180 PRESSURE (AND TEMP) SENSOR (DEFAULT I2C PINS A4, A5)
 Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
 float bmp_temperature;
 float bmp_pressure;
@@ -70,30 +80,31 @@ SwitecX25 *motor1;
 //OLED DISPLAY DEFINES
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
-/*
-//OLED display hardware SPI
-#define PIN_SPI_DC     6
-#define PIN_SPI_CS_OLED     7
-#define PIN_OLED_RESET  8
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
   &SPI, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
-*/
+
+/*
 // OLED display software SPI
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
   PIN_SPI_MOSI, PIN_SPI_CLK, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
-bool display_on;
+*/
+bool displayOn = true;
 
 void setup()
 {
   Serial.begin(9600);
+  while (!Serial) {}
+
+  //SD CARD READER
+  
 
   // ROTARY ENCODER INTERRUPT
   pinMode(PIN_ENCODER_CLK, INPUT);
   pinMode(PIN_ENCODER_DT, INPUT);
   pinMode(PIN_ENCODER_SW, INPUT_PULLUP);
-  attachInterrupt(PIN_ENCODER_CLK, encoder_clock, CHANGE);
-  attachInterrupt(PIN_ENCODER_SW, encoder_push, RISING);
-  encoder_clock_prev = digitalRead(PIN_ENCODER_CLK);
+  attachInterrupt(PIN_ENCODER_CLK, isrEncoderClock, CHANGE);
+  attachInterrupt(PIN_ENCODER_SW, isrEncoderPush, RISING);
+  //encoder_clock_prev = (bool)digitalRead(PIN_ENCODER_CLK);
 
   // BMP180 INIT
   /* Initialise the sensor */
@@ -140,6 +151,14 @@ void setup()
 
 void loop()
 {
+  if (millis() - lastInputMillis > DISPLAY_OFF_SEC*1000) {
+    setDisplayOff();
+    displayOn = false;
+  }
+  else {
+    displayOn = true;
+  }
+  
   //displayEncoderReadings();
 
   if (encoder_push_pressed) {
@@ -169,10 +188,15 @@ void loop()
     encoder_ccw_pressed = false;
   }
 
-  //readSensors();
-  printSensorReadings();
+  if (millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC*1000) {
+    readSensors();
+  }
 
+  if (displayOn) {
+    printSensorReadings();
+  }
 
+  /*
   static int nextPos = 0;
   // the motor only moves when you call update
   motor1->update();
@@ -186,6 +210,7 @@ void loop()
       nextPos = 10*nextPos + (c-'0');
     }
   }
+  */
 }
 
 
@@ -220,6 +245,7 @@ void readDht() {
 void readSensors() {
   readDht();
   readBmp();
+  lastSensorReadMillis = millis();
 }
 
 
@@ -254,8 +280,8 @@ void printSensorReadings() {
 }
 
 
-void encoder_clock() {
-  //if (millis() - last_input_millis < ENCODER_DEBOUNCE_MILLIS)
+void isrEncoderClock() {
+  //if (millis() - lastInputMillis < ENCODER_DEBOUNCE_MILLIS)
   bool encoder_clock = digitalRead(PIN_ENCODER_CLK);
   if (encoder_clock != encoder_clock_prev) {
     bool encoder_dt = digitalRead(PIN_ENCODER_DT);
@@ -269,14 +295,14 @@ void encoder_clock() {
     }
     encoder_clock_prev = encoder_clock;
   }
-  last_input_millis = millis();
+  lastInputMillis = millis();
 }
 
 
 // IRAM_ATTR?
-void encoder_push() {
+void isrEncoderPush() {
   encoder_push_pressed = true;
-  last_input_millis = millis();
+  lastInputMillis = millis();
 }
 
 
@@ -302,7 +328,12 @@ void displayEncoderReadings() {
   }
 }
 
-void display_off() {
+void setDisplayOff() {
   display.clearDisplay();
   display.display();
+}
+
+void initCardReader() {
+  Serial.println("Initializing SD card...");
+  Serial.println();
 }
