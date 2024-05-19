@@ -4,10 +4,11 @@
 
 //----------------------------------------------------------------------
 
-//#include <SD.h>
+#include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <DHT11.h>
+#include <DHT22.h>
+#include <DS18B20.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_Sensor.h>
@@ -31,18 +32,24 @@ enum displayState {
 #define PIN_SPI_CS_SD 7
 #define PIN_OLED_RESET 8
 #define PIN_DHT 6
-#define MOTOR1_PIN1 A0
-#define MOTOR1_PIN2 A1
-#define MOTOR1_PIN3 A2
-#define MOTOR1_PIN4 A3
+
+#define MOTOR1_PIN1 A3
+#define MOTOR1_PIN2 A6
+#define MOTOR1_PIN3 A6
+#define MOTOR1_PIN4 A7
+#define MOTOR2_PIN1 A0
+#define MOTOR2_PIN2 A1
+#define MOTOR2_PIN3 A2
+#define MOTOR2_PIN4 A3
 
 #define PIN_ENCODER_CLK 5
 #define PIN_ENCODER_DT 4
 #define PIN_ENCODER_SW 3 
 
+#define PIN_DS18B20 5   // ESP32 GPIO pin due to OneWire.h implementation
 
 // USER DEFINES
-#define DISPLAY_OFF_SEC 20
+#define DISPLAY_OFF_SEC 60
 #define SENSOR_READ_INTERV_SEC 5
 #define ENCODER_DEBOUNCE_MILLIS 5
 
@@ -58,8 +65,8 @@ volatile int encoder_position = 0;
 volatile unsigned long lastInputMillis = millis();
 unsigned long lastSensorReadMillis = 0;
 
-// DHT11 TEMP AND HUMIDITY SENSOR
-DHT11 dht11(PIN_DHT);
+// DHT22 TEMP AND HUMIDITY SENSOR
+DHT22 dht22(PIN_DHT);
 int dht_temperature;
 int dht_humidity_rel;
 
@@ -69,12 +76,18 @@ Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
 float bmp_temperature;
 float bmp_pressure;
 
+// DS18B20 1wire temp sensor
+DS18B20 ds(PIN_DS18B20);
+uint8_t ds_address[] = {40, 250, 31, 218, 4, 0, 0, 52};
+uint8_t ds_selected;
+float ds_temperature;
 
 // STEPPER MOTOR DEFINES
 // standard X25.168 range 315 degrees at 1/3 degree steps
 #define STEPS (315*3)
 //SwitecX25 motor1(STEPS,9,7,5,3);
 SwitecX25 *motor1;
+SwitecX25 *motor2;
 
 
 //OLED DISPLAY DEFINES
@@ -93,7 +106,8 @@ bool displayOn = true;
 void setup()
 {
   Serial.begin(9600);
-  while (!Serial) {}
+  delay(1000);
+  //while (!Serial) {}
 
   //SD CARD READER
   
@@ -115,17 +129,23 @@ void setup()
     //while(1);
   }
 
+  //DS18B20 INIT
+  ds_selected = ds.select(ds_address);
+
   // STEPPER MOTOR INIT
   // Setting pin mode in SwitecX25 constructor before setup() does not work
   // Create stepper object here
-  motor1 = new SwitecX25(STEPS, MOTOR1_PIN1, MOTOR1_PIN1, MOTOR1_PIN1, MOTOR1_PIN1);
+  motor1 = new SwitecX25(STEPS, MOTOR1_PIN1, MOTOR1_PIN2, MOTOR1_PIN3, MOTOR1_PIN4);
+  motor2 = new SwitecX25(STEPS, MOTOR2_PIN1, MOTOR2_PIN2, MOTOR2_PIN3, MOTOR2_PIN4);
   // run the motor against the stops
   motor1->zero();
+  motor2->zero();
   // start moving towards the center of the range
   motor1->setPosition(STEPS/2);
-  Serial.print("Enter a step position from 0 through ");
-  Serial.print(STEPS-1);
-  Serial.println(".");
+  motor2->setPosition(STEPS/2);
+  //Serial.print("Enter a step position from 0 through ");
+  //Serial.print(STEPS-1);
+  //Serial.println(".");
 
 
   // OLED DISPLAY INIT
@@ -234,17 +254,21 @@ void readBmp() {
   bmp.getTemperature(&bmp_temperature);
 }
 
+void readDs() {
+  ds_temperature = ds.getTempC();
+}
 
 void readDht() {
-  dht_temperature = dht11.readTemperature();
+  dht_temperature = dht22.getTemperature();
   //delay(50);  // For stable readings
-  dht_humidity_rel = dht11.readHumidity();
+  dht_humidity_rel = dht22.getHumidity();
 }
 
 
 void readSensors() {
   readDht();
   readBmp();
+  readDs();
   lastSensorReadMillis = millis();
 }
 
@@ -257,19 +281,23 @@ void printSensorReadings() {
   display.print(bmp_temperature);
   display.println(" C");
 
-  display.print("Pressure: ");
+  display.print("Pressure bmp: ");
   display.print(bmp_pressure);
   display.println(" hPa");
 
-  display.print("\n");
+  //display.print("\n");
 
   display.print("Temp dht: ");
   display.print(dht_temperature);
   display.println(" C");
 
-  display.print("Humidity: ");
+  display.print("Humidity dht: ");
   display.print(dht_humidity_rel);
   display.println(" %");
+
+  display.print("Temp ds: ");
+  display.print(ds_temperature);
+  display.println(" C");
 
   display.print("\n");
 
@@ -332,6 +360,26 @@ void setDisplayOff() {
   display.clearDisplay();
   display.display();
 }
+
+/*
+void setup() {
+  Serial.begin(9600); // start serial connection to print out debug messages and data
+  
+  pinMode(chipSelect, OUTPUT); // chip select pin must be set to OUTPUT mode
+  if (!SD.begin(chipSelect)) { // Initialize SD card
+    Serial.println("Could not initialize SD card."); // if return value is false, something went wrong.
+  }
+  
+  if (SD.exists("file.txt")) { // if "file.txt" exists, fill will be deleted
+    Serial.println("File exists.");
+    if (SD.remove("file.txt") == true) {
+      Serial.println("Successfully removed file.");
+    } else {
+      Serial.println("Could not removed file.");
+    }
+  }
+}
+*/
 
 void initCardReader() {
   Serial.println("Initializing SD card...");
