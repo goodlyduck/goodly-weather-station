@@ -17,16 +17,21 @@
 
 
 // STATES
-enum displayState {
+enum DisplayState {
+  INIT,
   OFF,
   SENSORS,
-  MENU
+  MENU,
+  MENU_SET_TIME,
+  MENU_ZERO_MOTOR_1,
+  MENU_ZERO_MOTOR_2,
+  MESSAGES
 };
 
+DisplayState displayState = INIT;
+//DisplayState displayStatePrev = INIT;
+
 // PINS
-//#define PIN_SPI_MOSI   3
-//#define PIN_SPI_MISO   9
-//#define PIN_SPI_CLK   2
 #define PIN_SPI_DC 9
 #define PIN_SPI_CS_OLED 10
 #define PIN_SPI_CS_SD 7
@@ -51,6 +56,7 @@ enum displayState {
 // USER DEFINES
 #define DISPLAY_OFF_SEC 60
 #define SENSOR_READ_INTERV_SEC 5
+#define SENSOR_READ_INPUT_DLY_SEC 5
 #define ENCODER_DEBOUNCE_MILLIS 5
 
 // ROTARY ENCODER PUSH BUTTON
@@ -95,77 +101,18 @@ SwitecX25 *motor2;
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
   &SPI, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
-
-/*
-// OLED display software SPI
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
-  PIN_SPI_MOSI, PIN_SPI_CLK, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
-*/
 bool displayOn = true;
 
 void setup()
 {
-  Serial.begin(9600);
-  delay(1000);
-  //while (!Serial) {}
-
-  //SD CARD READER
-  
-
-  // ROTARY ENCODER INTERRUPT
-  pinMode(PIN_ENCODER_CLK, INPUT);
-  pinMode(PIN_ENCODER_DT, INPUT);
-  pinMode(PIN_ENCODER_SW, INPUT_PULLUP);
-  attachInterrupt(PIN_ENCODER_CLK, isrEncoderClock, CHANGE);
-  attachInterrupt(PIN_ENCODER_SW, isrEncoderPush, RISING);
-  //encoder_clock_prev = (bool)digitalRead(PIN_ENCODER_CLK);
-
-  // BMP180 INIT
-  /* Initialise the sensor */
-  if(!bmp.begin())
-  {
-    /* There was a problem detecting the BMP085 ... check your connections */
-    Serial.print("Ooops, no BMP085 detected ... Check your wiring or I2C ADDR!");
-    //while(1);
-  }
-
-  //DS18B20 INIT
-  ds_selected = ds.select(ds_address);
-
-  // STEPPER MOTOR INIT
-  // Setting pin mode in SwitecX25 constructor before setup() does not work
-  // Create stepper object here
-  motor1 = new SwitecX25(STEPS, MOTOR1_PIN1, MOTOR1_PIN2, MOTOR1_PIN3, MOTOR1_PIN4);
-  motor2 = new SwitecX25(STEPS, MOTOR2_PIN1, MOTOR2_PIN2, MOTOR2_PIN3, MOTOR2_PIN4);
-  // run the motor against the stops
-  motor1->zero();
-  motor2->zero();
-  // start moving towards the center of the range
-  motor1->setPosition(STEPS/2);
-  motor2->setPosition(STEPS/2);
-  //Serial.print("Enter a step position from 0 through ");
-  //Serial.print(STEPS-1);
-  //Serial.println(".");
-
-
-  // OLED DISPLAY INIT
-  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
-  if(!display.begin(SSD1306_SWITCHCAPVCC)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;); // Don't proceed, loop forever
-  }
-  // Show initial display buffer contents on the screen --
-  // the library initializes this with an Adafruit splash screen.
-  display.display();
-  delay(1000); 
-  //testdrawcircle();
-  // Clear the buffer
-  display.clearDisplay();
-  display.display();
-  // Init text, enough to keep here?
-  display.setTextSize(1);      // Normal 1:1 pixel scale
-  display.setTextColor(SSD1306_WHITE); // Draw white text
-  display.cp437(true);         // Use full 256 char 'Code Page 437' font
+  initSerial();
+  initDisplay();
+  initEncoder();
+  initBmp();
+  initDs();
+  initSd();
+  //initDht();
+  initSteppers();
 }
 
 
@@ -361,27 +308,105 @@ void setDisplayOff() {
   display.display();
 }
 
-/*
-void setup() {
-  Serial.begin(9600); // start serial connection to print out debug messages and data
-  
-  pinMode(chipSelect, OUTPUT); // chip select pin must be set to OUTPUT mode
-  if (!SD.begin(chipSelect)) { // Initialize SD card
-    Serial.println("Could not initialize SD card."); // if return value is false, something went wrong.
+void initDisplay() {
+  // OLED DISPLAY INIT
+  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+  digitalWrite(PIN_SPI_CS_SD, HIGH);  // set other SPI devices' CS high
+  if(!display.begin(SSD1306_SWITCHCAPVCC)) {
+    Serial.println("SSD1306 allocation failed");
+    for(;;); // Don't proceed, loop forever
   }
-  
-  if (SD.exists("file.txt")) { // if "file.txt" exists, fill will be deleted
-    Serial.println("File exists.");
-    if (SD.remove("file.txt") == true) {
-      Serial.println("Successfully removed file.");
-    } else {
-      Serial.println("Could not removed file.");
-    }
+  // Show initial display buffer contents on the screen --
+  // the library initializes this with an Adafruit splash screen.
+  display.display();
+  delay(1000); 
+  //testdrawcircle();
+  // Clear the buffer
+  display.clearDisplay();
+  display.display();
+  // Init text, enough to keep here?
+  display.setTextSize(1);      // Normal 1:1 pixel scale
+  display.setTextColor(SSD1306_WHITE); // Draw white text
+  display.cp437(true);         // Use full 256 char 'Code Page 437' font
+}
+
+void initSd() {
+  //SD CARD READER
+  digitalWrite(PIN_SPI_CS_OLED, HIGH);
+  displayMessage("Initializing SD card");
+  delay(3000);
+  if (!SD.begin(PIN_SPI_CS_SD)) {
+    displayMessage("SD card failed or not present");
+    delay(3000);
+  }
+  else {
+    //displayMessage("SD card initialized");
+    //delay(3000);
   }
 }
-*/
 
-void initCardReader() {
-  Serial.println("Initializing SD card...");
-  Serial.println();
+void displayMessage(const String& message) {
+  if (displayState != MESSAGES) {
+    displayState = MESSAGES;
+    display.clearDisplay();
+    display.setCursor(0, 0);
+  }
+  display.println(message);
+  display.display();
+  Serial.println(message);
+}
+
+void initEncoder() {
+  // ROTARY ENCODER INTERRUPT
+  pinMode(PIN_ENCODER_CLK, INPUT);
+  pinMode(PIN_ENCODER_DT, INPUT);
+  pinMode(PIN_ENCODER_SW, INPUT_PULLUP);
+  attachInterrupt(PIN_ENCODER_CLK, isrEncoderClock, CHANGE);
+  attachInterrupt(PIN_ENCODER_SW, isrEncoderPush, RISING);
+}
+
+void initBmp() {
+   // BMP180 INIT
+  /* Initialise the sensor */
+  displayMessage("Initializing BMP085");
+  delay(1000);
+  if(!bmp.begin())
+  {
+    /* There was a problem detecting the BMP085 ... check your connections */
+    displayMessage("No BMP085 detected, check I2C");
+    delay(3000);
+    //while(1);
+  }
+}
+
+void initSerial() {
+  Serial.begin(115200);
+  delay(1000);
+  //while (!Serial) {}
+}
+
+void initDs() {
+  //DS18B20 INIT
+  displayMessage("Initializing DS18B20");
+  delay(1000);
+  ds_selected = ds.select(ds_address);
+}
+
+void initSteppers() {
+    // STEPPER MOTOR INIT
+  // Setting pin mode in SwitecX25 constructor before setup() does not work
+  // Create stepper object here
+  displayMessage("Initializing steppers");
+  delay(1000);
+  motor1 = new SwitecX25(STEPS, MOTOR1_PIN1, MOTOR1_PIN2, MOTOR1_PIN3, MOTOR1_PIN4);
+  motor2 = new SwitecX25(STEPS, MOTOR2_PIN1, MOTOR2_PIN2, MOTOR2_PIN3, MOTOR2_PIN4);
+  // run the motor against the stops
+  //motor1->zero();
+  //motor2->zero();
+  // start moving towards the center of the range
+  //motor1->setPosition(STEPS/2);
+  //motor2->setPosition(STEPS/2);
+  //Serial.print("Enter a step position from 0 through ");
+  //Serial.print(STEPS-1);
+  //Serial.println(".");
 }
