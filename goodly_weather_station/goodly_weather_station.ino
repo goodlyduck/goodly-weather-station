@@ -8,7 +8,6 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <WiFi.h>
-#include <time.h>
 #include <DHT22.h>
 #include <DS18B20.h>
 #include <Adafruit_GFX.h>
@@ -16,6 +15,16 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP085_U.h>
 #include "src/SwitecX25/SwitecX25.h"
+#include "src/NTPClient/NTPClient.h"
+
+// TIME
+WiFiUDP ntpUDP;
+// By default 'pool.ntp.org' is used with 60 seconds update interval and
+// no offset
+NTPClient timeClient(ntpUDP);
+String formattedDate;
+String dateStamp;
+String timeStamp;
 
 
 // STATES
@@ -78,10 +87,13 @@ DialState dialStateBottom = DialState::INIT;
 
 // USER DEFINES
 #define DISPLAY_OFF_SEC 60
-#define DISPLAY_MAX_LINES 8 // For font size 1
-#define SENSOR_READ_INTERV_SEC 5
+#define DISPLAY_LINES 8   // For font size 1
+#define DISPLAY_CHARS 21  // For font size 1
+#define SENSOR_READ_INTERV_SEC 10
 #define SENSOR_READ_INPUT_DLY_SEC 5
 #define ENCODER_DEBOUNCE_MILLIS 5
+#define DATA_LOG_FILE "/datalog.txt"
+#define DATA_LOG_HEADER "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
 
 
 // ROTARY ENCODER PUSH BUTTON
@@ -103,10 +115,11 @@ volatile unsigned long lastInputMillis = millis();
 unsigned long lastSensorReadMillis = 0;
 float temperature_in;
 float temperature_out;
+float temperature_pcb;
 float pressure;
 float humidity_rel;
 unsigned int currentMessageLine = 0;
-String messages[DISPLAY_MAX_LINES];
+String messages[DISPLAY_LINES];
 
 
 // DHT22 TEMP AND HUMIDITY SENSOR
@@ -155,6 +168,7 @@ void setup() {
   initDs();
   initSd();
   initWifi();
+  initTime();
   //initDht();
   initSteppers();
 }
@@ -170,11 +184,16 @@ void loop() {
 
   if (millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000) {
     readSensors();
+    arbitrateSensorReadings();
+    logData();
+    catFileSerial(DATA_LOG_FILE);
   }
 
   if (displayOn) {
     printSensorReadings();
   }
+
+  // if (timeClient.isTimeSet())
 }
 
 
@@ -208,14 +227,13 @@ void initSd() {
   //SD CARD READER
   digitalWrite(PIN_SPI_CS_OLED, HIGH);
   displayMessage("Initializing SD card");
-  delay(500);
   if (!SD.begin(PIN_SPI_CS_SD)) {
     displayMessage("SD card failed or not present");
-    delay(3000);
+    return;
   } else {
     listFiles(SD.open("/"), 0);
     displayMessage("SD card initialized");
-    delay(3000);
+    SD.remove(DATA_LOG_FILE);  // Recreate datalog file each time
     // File file = SD.open("/wifi.txt", FILE_WRITE);
     // if (file) {
     //   Serial.println("Writing to wifi.txt...");
@@ -228,6 +246,18 @@ void initSd() {
     // } else {
     //   Serial.println("Error opening file.");
     // }
+    if (!SD.exists(DATA_LOG_FILE)) {
+      File dataFile = SD.open(DATA_LOG_FILE, FILE_WRITE);
+      if (dataFile) {
+        dataFile.print(DATA_LOG_HEADER);
+        dataFile.print("\r\n");
+        dataFile.close();
+        displayMessage(String(DATA_LOG_FILE) + " created");
+        catFileSerial(DATA_LOG_FILE);
+      } else {
+        displayMessage("Failed to create + " DATA_LOG_FILE);
+      }
+    }
   }
 }
 
@@ -246,11 +276,9 @@ void initBmp() {
   // BMP180 INIT
   /* Initialise the sensor */
   displayMessage("Initializing BMP085");
-  delay(500);
   if (!bmp.begin()) {
     /* There was a problem detecting the BMP085 ... check your connections */
     displayMessage("No BMP085 detected, check I2C");
-    delay(3000);
     //while(1);
   }
 }
@@ -266,7 +294,6 @@ void initSerial() {
 void initDs() {
   //DS18B20 INIT
   displayMessage("Initializing DS18B20");
-  delay(500);
   ds_selected = ds.select(ds_address);
 }
 
@@ -277,17 +304,16 @@ void initSteppers() {
   // Create stepper object here
 
   displayMessage("Initializing steppers");
-  delay(500);
   motor1 = new SwitecX25(DIAL_RANGE_STEPS, MOTOR1_PIN1, MOTOR1_PIN2, MOTOR1_PIN3, MOTOR1_PIN4);
   motor2 = new SwitecX25(DIAL_RANGE_STEPS, MOTOR2_PIN1, MOTOR2_PIN2, MOTOR2_PIN3, MOTOR2_PIN4);
 
   //display.clearDisplay();
   //display.setCursor(0, 0);
 
-  displayMessage("Please center top dial");
+  displayMessage("Plz center top dial");
   zeroStepper(motor1);
 
-  displayMessage("Please center bottom dial");
+  displayMessage("Plz center bottom dial");
   zeroStepper(motor2);
 
   // motor1->setPosition(0);
@@ -329,6 +355,14 @@ void isrEncoderPush() {
 
 
 // OTHER FUNCTIONS
+
+void arbitrateSensorReadings() {
+  temperature_in = dht_temperature;
+  temperature_out = ds_temperature;
+  temperature_pcb = bmp_temperature;
+  pressure = bmp_pressure;
+  humidity_rel = dht_humidity_rel;
+}
 
 void zeroStepper(SwitecX25* motor) {
   int encoder_position_prev = encoder_position;
@@ -372,14 +406,16 @@ unsigned int valToDialPos(float val, float max, float min) {
 
 void displayMessage(const String& message) {
 
+  //int newLines = message.length()/DISPLAY_CHARS;
+
   // Change display state?
   if (displayState != DisplayState::MESSAGES) {
     displayState = DisplayState::MESSAGES;
   }
 
   // If buffer is full, shift all lines up
-  if (currentMessageLine >= DISPLAY_MAX_LINES) {
-    for (int i = 1; i < DISPLAY_MAX_LINES; i++) {
+  if (currentMessageLine >= DISPLAY_LINES) {
+    for (int i = 1; i < DISPLAY_LINES; i++) {
       messages[i - 1] = messages[i];
     }
     currentMessageLine--;
@@ -394,13 +430,15 @@ void displayMessage(const String& message) {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   for (int i = 0; i < currentMessageLine; i++) {
-    display.setCursor(0, i * 8); // Each line is 8 pixels tall
+    display.setCursor(0, i * 8);  // Each line is 8 pixels tall
     display.println(messages[i]);
   }
 
   display.display();
 
   Serial.println(message);
+
+  delay(200);
 }
 
 
@@ -533,7 +571,7 @@ void initWifi() {
       case WL_CONNECT_FAILED:
         Serial.print("[WiFi] Failed - WiFi not connected! Reason: ");
         return;
-        break; 
+        break;
       case WL_CONNECTION_LOST:
         Serial.println("[WiFi] Connection was lost");
         break;
@@ -590,6 +628,77 @@ void listFiles(File dir, int numTabs) {
     entry.close();
   }
 }
+
+
+void catFileSerial(const char* path) {
+  File file = SD.open(path, FILE_READ);
+  if (file) {
+    Serial.println("Contents of " + String(path) + ":");
+    Serial.println("==========");
+    while (file.available()) {
+      Serial.write(file.read());
+    }
+    file.close();
+    Serial.println("==========");
+    Serial.println("End of file.");
+  } else {
+    Serial.println("Error opening " + String(path));
+  }
+}
+
+
+void initTime() {
+  displayMessage("Initializing NTP time");
+  timeClient.begin();
+  getTimeStamp();
+  displayMessage(dateStamp + " " + timeStamp);
+}
+
+
+// Function to get date and time from NTPClient
+void getTimeStamp() {
+  while (!timeClient.update()) {
+    timeClient.forceUpdate();
+  }
+  // The formattedDate comes with the following format:
+  // 2018-05-28T16:00:13Z
+  // We need to extract date and time
+  formattedDate = timeClient.getFormattedDate();
+  //Serial.println(formattedDate);
+
+  // Extract date
+  int splitT = formattedDate.indexOf("T");
+  dateStamp = formattedDate.substring(0, splitT);
+  // Extract time
+  timeStamp = formattedDate.substring(splitT + 1, formattedDate.length() - 1);
+}
+
+
+void logData() {
+  // "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
+  File file = SD.open(DATA_LOG_FILE, FILE_WRITE);
+  if (file) {
+    file.seek(file.size());
+    file.print(dateStamp);
+    file.print(",");
+    file.print(timeStamp);
+    file.print(",");
+    file.print(temperature_in, 1);
+    file.print(",");
+    file.print(temperature_out, 1);
+    file.print(",");
+    file.print(temperature_pcb, 1);
+    file.print(",");
+    file.print(humidity_rel, 1);
+    file.print(",");
+    file.print(pressure, 1);
+    file.print("\r\n");
+    file.close();
+  } else {
+    displayMessage("Error opening " + String(DATA_LOG_FILE));
+  }
+}
+
 
 // void updateDisplay() {
 //   switch(displayState) {
