@@ -26,7 +26,6 @@ String formattedDate;
 String dateStamp;
 String timeStamp;
 
-
 // STATES
 enum class DisplayState {
   INIT,
@@ -50,17 +49,16 @@ enum class DialState {
   HUMIDITY
 };
 
-DialState dialStateTop = DialState::INIT;
-DialState dialStateBottom = DialState::INIT;
+DialState dialStateTop = DialState::TEMPERATURE_IN;
+DialState dialStateBottom = DialState::HUMIDITY;
 
 // DIAL LIMITS
-#define DIAL_TEMPERATURE_MAX 50
-#define DIAL_TEMPERATURE_MIN -50
+#define DIAL_TEMPERATURE_MAX 35
+#define DIAL_TEMPERATURE_MIN -35
 #define DIAL_PRESSURE_MAX 1200
 #define DIAL_PRESSURE_MIN 800
-#define DIAL_HUMIDITY_MAX 100
-#define DIAL_HUMIDITY_MIN 0
-
+#define DIAL_HUMIDITY_MAX 107.14
+#define DIAL_HUMIDITY_MIN -7.14
 
 // PINS
 #define PIN_SPI_DC 9
@@ -84,31 +82,28 @@ DialState dialStateBottom = DialState::INIT;
 
 #define PIN_DS18B20 5  // ESP32 GPIO pin due to OneWire.h implementation
 
-
 // USER DEFINES
 #define DISPLAY_OFF_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
-#define SENSOR_READ_INTERV_SEC 10
+#define SENSOR_READ_INTERV_SEC 60
 #define SENSOR_READ_INPUT_DLY_SEC 5
 #define ENCODER_DEBOUNCE_MILLIS 5
 #define DATA_LOG_FILE "/datalog.txt"
 #define DATA_LOG_HEADER "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
-
+#define DIAL_POS_FILE "/dialpos.txt"
 
 // ROTARY ENCODER PUSH BUTTON
-//detachInterrupt(GPIOPin);
+// detachInterrupt(GPIOPin);
 volatile bool encoder_clock_prev;
 volatile bool encoder_cw_pressed = false;
 volatile bool encoder_ccw_pressed = false;
 volatile bool encoder_push_pressed = false;
 volatile int encoder_position = 0;
 
-
 // USER CONSTANTS
-const char* ntpServer = "pool.ntp.org";
+const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 0;
-
 
 // USER VARIABLES
 volatile unsigned long lastInputMillis = millis();
@@ -120,19 +115,18 @@ float pressure;
 float humidity_rel;
 unsigned int currentMessageLine = 0;
 String messages[DISPLAY_LINES];
-
+unsigned int storedDialPosTop;
+unsigned int storedDialPosBottom;
 
 // DHT22 TEMP AND HUMIDITY SENSOR
 DHT22 dht22(PIN_DHT);
 float dht_temperature;
 float dht_humidity_rel;
 
-
 // BMP180 PRESSURE (AND TEMP) SENSOR (DEFAULT I2C PINS A4, A5)
 Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
 float bmp_temperature;
 float bmp_pressure;
-
 
 // DS18B20 1wire temp sensor
 DS18B20 ds(PIN_DS18B20);
@@ -140,25 +134,24 @@ uint8_t ds_address[] = { 40, 250, 31, 218, 4, 0, 0, 52 };
 uint8_t ds_selected;
 float ds_temperature;
 
-
 // STEPPER MOTOR DEFINES
 // standard X25.168 range 315 degrees at 1/3 degree steps
-//#define STEPS (315*3)
-//#define STEPS (360*3)
-#define DIAL_RANGE_DEG 216
+// #define STEPS (315*3)
+// #define STEPS (360*3)
+// #define DIAL_RANGE_DEG 216 // Limited to front markings
+#define DIAL_RANGE_DEG 252    // Limited to front markings plus one more
 #define DIAL_RANGE_STEPS (DIAL_RANGE_DEG * 3)
-//SwitecX25 motor1(STEPS,9,7,5,3);
-SwitecX25* motor1;
-SwitecX25* motor2;
+#define DIAL_CAL_STEPS 2
+// SwitecX25 motor1(STEPS,9,7,5,3);
+SwitecX25 *motor1;
+SwitecX25 *motor2;
 
-
-//OLED DISPLAY DEFINES
+// OLED DISPLAY DEFINES
 #define SCREEN_WIDTH 128  // OLED display width, in pixels
 #define SCREEN_HEIGHT 64  // OLED display height, in pixels
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
                          &SPI, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
 bool displayOn = true;
-
 
 void setup() {
   initSerial();
@@ -169,10 +162,14 @@ void setup() {
   initSd();
   initWifi();
   initTime();
-  //initDht();
+  // initDht();
   initSteppers();
-}
 
+  readSensors();
+  arbitrateSensorReadings();
+  updateDialPos(motor1, dialStateTop);
+  updateDialPos(motor2, dialStateBottom);
+}
 
 void loop() {
   if (millis() - lastInputMillis > DISPLAY_OFF_SEC * 1000) {
@@ -185,17 +182,22 @@ void loop() {
   if (millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000) {
     readSensors();
     arbitrateSensorReadings();
-    logData();
-    catFileSerial(DATA_LOG_FILE);
+    if (timeClient.isTimeSet()) {
+      logData();
+      catFileSerial(DATA_LOG_FILE);
+    }
+    updateDialPos(motor1, dialStateTop);
+    updateDialPos(motor2, dialStateBottom);
   }
 
   if (displayOn) {
     printSensorReadings();
   }
+  motor1->update();
+  motor2->update();
 
   // if (timeClient.isTimeSet())
 }
-
 
 // INIT FUNCTIONS
 
@@ -210,9 +212,9 @@ void initDisplay() {
   }
   // Show initial display buffer contents on the screen --
   // the library initializes this with an Adafruit splash screen.
-  //display.display();
-  //delay(1000);
-  //testdrawcircle();
+  // display.display();
+  // delay(1000);
+  // testdrawcircle();
   // Clear the buffer
   display.clearDisplay();
   display.display();
@@ -222,9 +224,8 @@ void initDisplay() {
   display.cp437(true);                  // Use full 256 char 'Code Page 437' font
 }
 
-
 void initSd() {
-  //SD CARD READER
+  // SD CARD READER
   digitalWrite(PIN_SPI_CS_OLED, HIGH);
   displayMessage("Initializing SD card");
   if (!SD.begin(PIN_SPI_CS_SD)) {
@@ -261,7 +262,6 @@ void initSd() {
   }
 }
 
-
 void initEncoder() {
   // ROTARY ENCODER INTERRUPT
   pinMode(PIN_ENCODER_CLK, INPUT);
@@ -271,7 +271,6 @@ void initEncoder() {
   attachInterrupt(PIN_ENCODER_SW, isrEncoderPush, RISING);
 }
 
-
 void initBmp() {
   // BMP180 INIT
   /* Initialise the sensor */
@@ -279,24 +278,21 @@ void initBmp() {
   if (!bmp.begin()) {
     /* There was a problem detecting the BMP085 ... check your connections */
     displayMessage("No BMP085 detected, check I2C");
-    //while(1);
+    // while(1);
   }
 }
-
 
 void initSerial() {
   Serial.begin(115200);
   delay(1000);
-  //while (!Serial) {}
+  // while (!Serial) {}
 }
 
-
 void initDs() {
-  //DS18B20 INIT
+  // DS18B20 INIT
   displayMessage("Initializing DS18B20");
   ds_selected = ds.select(ds_address);
 }
-
 
 void initSteppers() {
   // STEPPER MOTOR INIT
@@ -307,38 +303,41 @@ void initSteppers() {
   motor1 = new SwitecX25(DIAL_RANGE_STEPS, MOTOR1_PIN1, MOTOR1_PIN2, MOTOR1_PIN3, MOTOR1_PIN4);
   motor2 = new SwitecX25(DIAL_RANGE_STEPS, MOTOR2_PIN1, MOTOR2_PIN2, MOTOR2_PIN3, MOTOR2_PIN4);
 
-  //display.clearDisplay();
-  //display.setCursor(0, 0);
+  // display.clearDisplay();
+  // display.setCursor(0, 0);
+
+  readMotorPos();
+
+  motor1->setCurrentStep(storedDialPosTop);
+  displayMessage("Top: " + String(storedDialPosTop));
+  motor2->setCurrentStep(storedDialPosBottom);
+  displayMessage("Bottom: " + String(storedDialPosBottom));
+
+  motor1->setPosition(DIAL_RANGE_STEPS/2);
+  motor2->setPosition(DIAL_RANGE_STEPS/2);
+
+  motor1->updateBlocking();
+  motor2->updateBlocking();
 
   displayMessage("Plz center top dial");
   zeroStepper(motor1);
 
   displayMessage("Plz center bottom dial");
   zeroStepper(motor2);
-
-  // motor1->setPosition(0);
-  // motor1->updateBlocking();
-  // motor1->setPosition(DIAL_RANGE_STEPS/2);
-  // motor1->updateBlocking();
-  // motor2->setPosition(0);
-  // motor2->updateBlocking();
-  // motor2->setPosition(DIAL_RANGE_STEPS/2);
-  // motor2->updateBlocking();
 }
-
 
 // INTERRUPT FUNCTIONS
 
 void isrEncoderClock() {
-  //if (millis() - lastInputMillis < ENCODER_DEBOUNCE_MILLIS)
+  // if (millis() - lastInputMillis < ENCODER_DEBOUNCE_MILLIS)
   bool encoder_clock = digitalRead(PIN_ENCODER_CLK);
   if (encoder_clock != encoder_clock_prev) {
     bool encoder_dt = digitalRead(PIN_ENCODER_DT);
     if (encoder_dt != encoder_clock) {
-      //encoder_cw_pressed = true;
+      // encoder_cw_pressed = true;
       encoder_position++;
     } else {
-      //encoder_ccw_pressed = true;
+      // encoder_ccw_pressed = true;
       encoder_position--;
     }
     encoder_clock_prev = encoder_clock;
@@ -346,13 +345,11 @@ void isrEncoderClock() {
   lastInputMillis = millis();
 }
 
-
 // IRAM_ATTR?
 void isrEncoderPush() {
   encoder_push_pressed = true;
   lastInputMillis = millis();
 }
-
 
 // OTHER FUNCTIONS
 
@@ -364,49 +361,52 @@ void arbitrateSensorReadings() {
   humidity_rel = dht_humidity_rel;
 }
 
-void zeroStepper(SwitecX25* motor) {
+void zeroStepper(SwitecX25 *motor) {
   int encoder_position_prev = encoder_position;
   encoder_push_pressed = false;
   while (!encoder_push_pressed) {
     if (encoder_position > encoder_position_prev) {
-      motor->resetCenterPos();
-      motor->setPosition(DIAL_RANGE_STEPS / 2 + 2);
+      motor->setCurrentStep(DIAL_RANGE_STEPS / 2);
+      motor->setPosition(DIAL_RANGE_STEPS / 2 + DIAL_CAL_STEPS);
       encoder_position_prev = encoder_position;
     } else if (encoder_position < encoder_position_prev) {
-      motor->resetCenterPos();
-      motor->setPosition(DIAL_RANGE_STEPS / 2 - 2);
+      motor->setCurrentStep(DIAL_RANGE_STEPS / 2);
+      motor->setPosition(DIAL_RANGE_STEPS / 2 - DIAL_CAL_STEPS);
       encoder_position_prev = encoder_position;
     }
     motor->update();
   }
-  motor->resetCenterPos();
+  motor->setCurrentStep(DIAL_RANGE_STEPS / 2);
 }
 
-
-void updateDial(SwitecX25* motor, DialState state) {
+void updateDialPos(SwitecX25 *motor, DialState state) {
+  unsigned int position;
   switch (state) {
     case DialState::TEMPERATURE_IN:
-      //position = valToDialPos(temperature_in, DIAL_TEMPERATURE_MAX, DIAL_TEMPERATURE_MIN);
-      //motor->setPosition(position);
+      position = valToDialPos(temperature_in, DIAL_TEMPERATURE_MIN, DIAL_TEMPERATURE_MAX);
+      motor->setPosition(position);
       break;
     case DialState::TEMPERATURE_OUT:
       break;
     case DialState::PRESSURE:
+      position = valToDialPos(pressure, DIAL_PRESSURE_MIN, DIAL_PRESSURE_MAX);
+      motor->setPosition(position);
       break;
     case DialState::HUMIDITY:
+      position = valToDialPos(humidity_rel, DIAL_HUMIDITY_MIN, DIAL_HUMIDITY_MAX);
+      motor->setPosition(position);
       break;
   }
-  motor->updateBlocking();
+  storeMotorPos();
 }
 
-
-unsigned int valToDialPos(float val, float max, float min) {
+unsigned int valToDialPos(float val, float min, float max) {
+  return map(val, min, max, 0, DIAL_RANGE_STEPS);
 }
 
+void displayMessage(const String &message) {
 
-void displayMessage(const String& message) {
-
-  //int newLines = message.length()/DISPLAY_CHARS;
+  // int newLines = message.length()/DISPLAY_CHARS;
 
   // Change display state?
   if (displayState != DisplayState::MESSAGES) {
@@ -441,7 +441,6 @@ void displayMessage(const String& message) {
   delay(200);
 }
 
-
 void displayEncoderReadings() {
   bool CLK = true;
   bool DT = true;
@@ -464,12 +463,10 @@ void displayEncoderReadings() {
   }
 }
 
-
 void setDisplayOff() {
   display.clearDisplay();
   display.display();
 }
-
 
 void readBmp() {
   sensors_event_t event;
@@ -478,18 +475,15 @@ void readBmp() {
   bmp.getTemperature(&bmp_temperature);
 }
 
-
 void readDs() {
   ds_temperature = ds.getTempC();
 }
 
-
 void readDht() {
   dht_temperature = dht22.getTemperature();
-  //delay(50);  // For stable readings
+  // delay(50);  // For stable readings
   dht_humidity_rel = dht22.getHumidity();
 }
-
 
 void readSensors() {
   readDht();
@@ -497,7 +491,6 @@ void readSensors() {
   readDs();
   lastSensorReadMillis = millis();
 }
-
 
 void printSensorReadings() {
   display.clearDisplay();
@@ -511,7 +504,7 @@ void printSensorReadings() {
   display.print(bmp_pressure);
   display.println(" hPa");
 
-  //display.print("\n");
+  // display.print("\n");
 
   display.print("Temp dht: ");
   display.print(dht_temperature);
@@ -533,7 +526,6 @@ void printSensorReadings() {
   display.display();
 }
 
-
 void initWifi() {
   String password;
   String ssid;
@@ -543,13 +535,13 @@ void initWifi() {
     if (file.available()) {
       ssid = file.readStringUntil('\n');
       ssid.trim();
-      //ssid = line.c_str();
+      // ssid = line.c_str();
       displayMessage(ssid);
     }
     if (file.available()) {
       password = file.readStringUntil('\n');
       password.trim();
-      //password = line.c_str();
+      // password = line.c_str();
       displayMessage(password);
     }
   } else {
@@ -605,7 +597,6 @@ void initWifi() {
   }
 }
 
-
 void listFiles(File dir, int numTabs) {
   while (true) {
     File entry = dir.openNextFile();
@@ -629,8 +620,7 @@ void listFiles(File dir, int numTabs) {
   }
 }
 
-
-void catFileSerial(const char* path) {
+void catFileSerial(const char *path) {
   File file = SD.open(path, FILE_READ);
   if (file) {
     Serial.println("Contents of " + String(path) + ":");
@@ -645,7 +635,6 @@ void catFileSerial(const char* path) {
     Serial.println("Error opening " + String(path));
   }
 }
-
 
 void initTime() {
   displayMessage("Initializing NTP time");
@@ -664,7 +653,7 @@ void getTimeStamp() {
   // 2018-05-28T16:00:13Z
   // We need to extract date and time
   formattedDate = timeClient.getFormattedDate();
-  //Serial.println(formattedDate);
+  // Serial.println(formattedDate);
 
   // Extract date
   int splitT = formattedDate.indexOf("T");
@@ -672,7 +661,6 @@ void getTimeStamp() {
   // Extract time
   timeStamp = formattedDate.substring(splitT + 1, formattedDate.length() - 1);
 }
-
 
 void logData() {
   // "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
@@ -695,10 +683,37 @@ void logData() {
     file.print("\r\n");
     file.close();
   } else {
-    displayMessage("Error opening " + String(DATA_LOG_FILE));
+    displayMessage("Error writing " + String(DATA_LOG_FILE));
   }
 }
 
+
+void storeMotorPos() {
+  File file = SD.open(DIAL_POS_FILE, FILE_WRITE);
+  if (file) {
+    file.println(motor1->getTargetPosition());
+    file.println(motor2->getTargetPosition());
+    file.close();
+    catFileSerial(DIAL_POS_FILE);
+  } else {
+    displayMessage("Error writing " + String(DIAL_POS_FILE));
+  }
+}
+
+void readMotorPos() {
+  File file = SD.open(DIAL_POS_FILE, FILE_READ);
+  if (file) {
+    String lineOne = file.readStringUntil('\n');
+    displayMessage("Line one: " + lineOne);
+    String lineTwo = file.readStringUntil('\n');
+    lineOne.trim();
+    lineTwo.trim();
+    storedDialPosTop = (unsigned int)lineOne.toInt();
+    storedDialPosBottom = (unsigned int)lineTwo.toInt();
+  } else {
+    displayMessage("Error reading " + String(DIAL_POS_FILE));
+  }
+}
 
 // void updateDisplay() {
 //   switch(displayState) {

@@ -109,9 +109,9 @@ void SwitecX25::zero()
   dir = 0;
 }
 
-void SwitecX25::resetCenterPos()
+void SwitecX25::setCurrentStep(unsigned int pos) 
 {
-  currentStep = steps / 2;
+  currentStep = pos;
 }
 
 // This function determines the speed and accel
@@ -209,6 +209,11 @@ void SwitecX25::setPosition(unsigned int pos)
     time0 = micros();
     microDelay = 0;
   }
+}
+
+unsigned int SwitecX25::getTargetPosition()
+{
+  return targetStep;
 }
 
 void SwitecX25::update()

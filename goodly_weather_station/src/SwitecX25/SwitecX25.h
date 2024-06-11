@@ -34,10 +34,11 @@ public:
   void stepUp();
   void stepDown();
   void zero();
-  void resetCenterPos();
   void update();
   void updateBlocking();
   void setPosition(unsigned int pos);
+  void setCurrentStep(unsigned int pos);
+  unsigned int getTargetPosition();
 
 private:
   void advance();
