@@ -9,6 +9,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <DHT22.h>
+#include <RTClib.h>
 #include <DS18B20.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -49,8 +50,8 @@ enum class DialState {
   HUMIDITY
 };
 
-DialState dialStateTop = DialState::TEMPERATURE_IN;
-DialState dialStateBottom = DialState::HUMIDITY;
+DialState dialStateTop = DialState::TEMPERATURE_OUT;
+DialState dialStateBottom = DialState::TEMPERATURE_IN;
 
 // DIAL LIMITS
 #define DIAL_TEMPERATURE_MAX 35
@@ -86,12 +87,13 @@ DialState dialStateBottom = DialState::HUMIDITY;
 #define DISPLAY_OFF_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
-#define SENSOR_READ_INTERV_SEC 60
+#define SENSOR_READ_INTERV_SEC 1
 #define SENSOR_READ_INPUT_DLY_SEC 5
 #define ENCODER_DEBOUNCE_MILLIS 5
 #define DATA_LOG_FILE "/datalog.txt"
 #define DATA_LOG_HEADER "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
 #define DIAL_POS_FILE "/dialpos.txt"
+#define WIFI_FILE "/wifi.txt"
 
 // ROTARY ENCODER PUSH BUTTON
 // detachInterrupt(GPIOPin);
@@ -104,6 +106,13 @@ volatile int encoder_position = 0;
 // USER CONSTANTS
 const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 0;
+const char *logQuantities[5] = {
+  "TempIn",
+  "TempOut",
+  "TempPcb",
+  "HumidityIn",
+  "PressureIn"
+};
 
 // USER VARIABLES
 volatile unsigned long lastInputMillis = millis();
@@ -139,7 +148,7 @@ float ds_temperature;
 // #define STEPS (315*3)
 // #define STEPS (360*3)
 // #define DIAL_RANGE_DEG 216 // Limited to front markings
-#define DIAL_RANGE_DEG 252    // Limited to front markings plus one more
+#define DIAL_RANGE_DEG 252  // Limited to front markings plus one more
 #define DIAL_RANGE_STEPS (DIAL_RANGE_DEG * 3)
 #define DIAL_CAL_STEPS 2
 // SwitecX25 motor1(STEPS,9,7,5,3);
@@ -184,14 +193,15 @@ void loop() {
     arbitrateSensorReadings();
     if (timeClient.isTimeSet()) {
       logData();
-      catFileSerial(DATA_LOG_FILE);
+      //catFileSerial(DATA_LOG_FILE);
     }
     updateDialPos(motor1, dialStateTop);
     updateDialPos(motor2, dialStateBottom);
   }
 
   if (displayOn) {
-    printSensorReadings();
+    //printSensorReadings();
+    plotData("TempOut", 0.1, dateStamp, timeStamp);
   }
   motor1->update();
   motor2->update();
@@ -254,7 +264,7 @@ void initSd() {
         dataFile.print("\r\n");
         dataFile.close();
         displayMessage(String(DATA_LOG_FILE) + " created");
-        catFileSerial(DATA_LOG_FILE);
+        //catFileSerial(DATA_LOG_FILE);catFileSerial
       } else {
         displayMessage("Failed to create + " DATA_LOG_FILE);
       }
@@ -309,15 +319,17 @@ void initSteppers() {
   readMotorPos();
 
   motor1->setCurrentStep(storedDialPosTop);
-  displayMessage("Top: " + String(storedDialPosTop));
+  //displayMessage("Top: " + String(storedDialPosTop));
   motor2->setCurrentStep(storedDialPosBottom);
-  displayMessage("Bottom: " + String(storedDialPosBottom));
+  //displayMessage("Bottom: " + String(storedDialPosBottom));
 
-  motor1->setPosition(DIAL_RANGE_STEPS/2);
-  motor2->setPosition(DIAL_RANGE_STEPS/2);
+  motor1->setPosition(DIAL_RANGE_STEPS / 2);
+  motor2->setPosition(DIAL_RANGE_STEPS / 2);
 
   motor1->updateBlocking();
   motor2->updateBlocking();
+
+  storeMotorPos();
 
   displayMessage("Plz center top dial");
   zeroStepper(motor1);
@@ -387,6 +399,8 @@ void updateDialPos(SwitecX25 *motor, DialState state) {
       motor->setPosition(position);
       break;
     case DialState::TEMPERATURE_OUT:
+      position = valToDialPos(temperature_out, DIAL_TEMPERATURE_MIN, DIAL_TEMPERATURE_MAX);
+      motor->setPosition(position);
       break;
     case DialState::PRESSURE:
       position = valToDialPos(pressure, DIAL_PRESSURE_MIN, DIAL_PRESSURE_MAX);
@@ -401,17 +415,14 @@ void updateDialPos(SwitecX25 *motor, DialState state) {
 }
 
 unsigned int valToDialPos(float val, float min, float max) {
-  return map(val, min, max, 0, DIAL_RANGE_STEPS);
+  return map_float(val, min, max, 0, DIAL_RANGE_STEPS);
 }
 
 void displayMessage(const String &message) {
 
   // int newLines = message.length()/DISPLAY_CHARS;
 
-  // Change display state?
-  if (displayState != DisplayState::MESSAGES) {
-    displayState = DisplayState::MESSAGES;
-  }
+  displayState = DisplayState::MESSAGES;
 
   // If buffer is full, shift all lines up
   if (currentMessageLine >= DISPLAY_LINES) {
@@ -530,22 +541,22 @@ void initWifi() {
   String password;
   String ssid;
   displayMessage("Initializing WiFi");
-  File file = SD.open("/wifi.txt");
+  File file = SD.open(WIFI_FILE);
   if (file) {
     if (file.available()) {
       ssid = file.readStringUntil('\n');
       ssid.trim();
       // ssid = line.c_str();
-      displayMessage(ssid);
+      displayMessage("WiFi: " + ssid);
     }
     if (file.available()) {
       password = file.readStringUntil('\n');
       password.trim();
       // password = line.c_str();
-      displayMessage(password);
+      //displayMessage(password);
     }
   } else {
-    displayMessage("Could not open /wifi.txt");
+    displayMessage("Could not open " + String(WIFI_FILE));
     return;
   }
   WiFi.mode(WIFI_STA);
@@ -694,7 +705,7 @@ void storeMotorPos() {
     file.println(motor1->getTargetPosition());
     file.println(motor2->getTargetPosition());
     file.close();
-    catFileSerial(DIAL_POS_FILE);
+    //catFileSerial(DIAL_POS_FILE);
   } else {
     displayMessage("Error writing " + String(DIAL_POS_FILE));
   }
@@ -704,7 +715,7 @@ void readMotorPos() {
   File file = SD.open(DIAL_POS_FILE, FILE_READ);
   if (file) {
     String lineOne = file.readStringUntil('\n');
-    displayMessage("Line one: " + lineOne);
+    //displayMessage("Line one: " + lineOne);
     String lineTwo = file.readStringUntil('\n');
     lineOne.trim();
     lineTwo.trim();
@@ -715,17 +726,138 @@ void readMotorPos() {
   }
 }
 
-// void updateDisplay() {
-//   switch(displayState) {
-//     case MENU_ZERO_MOTOR_1:
+float map_float(float x, float in_min, float in_max, float out_min, float out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
-//   }
-//   //   INIT,
-//   // OFF,
-//   // SENSORS,
-//   // MENU,
-//   // MENU_SET_TIME,
-//   // MENU_ZERO_MOTOR_1,
-//   // MENU_ZERO_MOTOR_2,
-//   // MESSAGES
-// }
+
+void plotData(const char* var, float hours, String& currentDate, String& currentTime) {
+  File file = SD.open(DATA_LOG_FILE);
+
+  if (!file) {
+    Serial.print("Error opening file ");
+    Serial.println(DATA_LOG_FILE);
+    return;
+  }
+
+  const int maxDataPoints = SCREEN_WIDTH;
+  float data[maxDataPoints];
+  int dataCount = 0;
+  int varIndex = -1;
+
+  DateTime now = DateTime(currentDate.substring(0, 4).toInt(),
+                          currentDate.substring(5, 7).toInt(),
+                          currentDate.substring(8, 10).toInt(),
+                          currentTime.substring(0, 2).toInt(),
+                          currentTime.substring(3, 5).toInt(),
+                          currentTime.substring(6, 8).toInt());
+  DateTime startTime = now - TimeSpan(hours * 3600);
+
+  // Read the header line
+  String headerLine = file.readStringUntil('\n');
+  int commaCount = 0;
+  int startIdx = 0;
+
+  for (int i = 0; i < headerLine.length(); i++) {
+    if (headerLine[i] == ',' || i == headerLine.length() - 1) {
+      String header = headerLine.substring(startIdx, i == headerLine.length() - 1 ? i + 1 : i);
+      if (header.equals(var)) {
+        varIndex = commaCount;
+        break;
+      }
+      commaCount++;
+      startIdx = i + 1;
+    }
+  }
+
+  if (varIndex == -1) {
+    Serial.print("Variable ");
+    Serial.print(var);
+    Serial.println(" not found in header.");
+    file.close();
+    return;
+  }
+
+  // Read data lines
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    int commaCount = 0;
+    int startIdx = 0;
+
+    // Extract the date and time
+    String dateStr = "";
+    String timeStr = "";
+    bool isDateFound = false;
+    bool isTimeFound = false;
+    for (int i = 0; i < line.length(); i++) {
+      if (line[i] == ',' || i == line.length() - 1) {
+        if (!isDateFound) {
+          dateStr = line.substring(startIdx, i == line.length() - 1 ? i + 1 : i);
+          isDateFound = true;
+        } else if (!isTimeFound) {
+          timeStr = line.substring(startIdx, i == line.length() - 1 ? i + 1 : i);
+          isTimeFound = true;
+        } else if (commaCount == varIndex) {
+          String dataStr = line.substring(startIdx, i == line.length() - 1 ? i + 1 : i);
+          float value = dataStr.toFloat();
+          DateTime logTime = DateTime(dateStr.substring(0, 4).toInt(),
+                                      dateStr.substring(5, 7).toInt(),
+                                      dateStr.substring(8, 10).toInt(),
+                                      timeStr.substring(0, 2).toInt(),
+                                      timeStr.substring(3, 5).toInt(),
+                                      timeStr.substring(6, 8).toInt());
+          if (logTime >= startTime) {
+            if (dataCount < maxDataPoints) {
+              data[dataCount] = value;
+              dataCount++;
+            } else {
+              // Shift data to the left to make room for new data
+              for (int j = 0; j < maxDataPoints - 1; j++) {
+                data[j] = data[j + 1];
+              }
+              data[maxDataPoints - 1] = value;
+            }
+          }
+          break;
+        }
+        commaCount++;
+        startIdx = i + 1;
+      }
+    }
+  }
+
+  file.close();
+
+  // Find the minimum and maximum data values
+  float minData = data[0];
+  float maxData = data[0];
+  for (int i = 1; i < dataCount; i++) {
+    if (data[i] < minData) {
+      minData = data[i];
+    }
+    if (data[i] > maxData) {
+      maxData = data[i];
+    }
+  }
+
+  // Plot the data
+  display.clearDisplay();
+
+  // Print min and max values to the left of the y-axis
+  display.setCursor(0, 0);
+  display.print((int)maxData); // Print max value at the top
+  display.setCursor(0, SCREEN_HEIGHT - 8);
+  display.print((int)minData); // Print min value at the bottom
+
+  display.drawLine(20, 0, 20, SCREEN_HEIGHT - 1, SSD1306_WHITE); // Y-axis
+  display.drawLine(20, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE); // X-axis
+
+  for (int i = 0; i < dataCount; i++) {
+    int x = 20 + i;
+    int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 1, 0.0); // Reverse y-axis mapping
+    display.drawPixel(x, y, SSD1306_WHITE);
+  }
+
+  display.display();
+}
+
