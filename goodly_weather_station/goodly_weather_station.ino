@@ -8,6 +8,7 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <WiFi.h>
+//#include <time.h>
 #include <DHT22.h>
 #include <RTClib.h>
 #include <DS18B20.h>
@@ -30,17 +31,16 @@ String timeStamp;
 // STATES
 enum class DisplayState {
   INIT,
-  OFF,
   SENSORS,
   MENU,
   MENU_SET_TIME,
   MENU_ZERO_MOTOR_1,
   MENU_ZERO_MOTOR_2,
-  MESSAGES
+  PLOT
 };
 
-DisplayState displayState = DisplayState::INIT;
-DisplayState displayStatePrev = DisplayState::INIT;
+DisplayState displayState = DisplayState::PLOT;
+DisplayState displayStatePrev = DisplayState::PLOT;
 
 enum class DialState {
   INIT,
@@ -84,12 +84,14 @@ DialState dialStateBottom = DialState::TEMPERATURE_IN;
 #define PIN_DS18B20 5  // ESP32 GPIO pin due to OneWire.h implementation
 
 // USER DEFINES
+#define MESSAGE_SIGN_SEC 1
 #define DISPLAY_OFF_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
-#define SENSOR_READ_INTERV_SEC 1
-#define SENSOR_READ_INPUT_DLY_SEC 5
-#define ENCODER_DEBOUNCE_MILLIS 5
+#define SENSOR_READ_INTERV_SEC 10
+//#define SENSOR_READ_INPUT_DLY_SEC 5
+#define SENSOR_VALUE_ERROR = -999
+#define ENCODER_DEBOUNCE_MILLIS 100
 #define DATA_LOG_FILE "/datalog.txt"
 #define DATA_LOG_HEADER "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
 #define DIAL_POS_FILE "/dialpos.txt"
@@ -102,6 +104,9 @@ volatile bool encoder_cw_pressed = false;
 volatile bool encoder_ccw_pressed = false;
 volatile bool encoder_push_pressed = false;
 volatile int encoder_position = 0;
+volatile int encoder_position_raw = 0;
+int encoder_position_prev = 0;
+volatile unsigned long lastEncoderInputMillis = millis();
 
 // USER CONSTANTS
 const char *ntpServer = "pool.ntp.org";
@@ -116,6 +121,8 @@ const char *logQuantities[5] = {
 
 // USER VARIABLES
 volatile unsigned long lastInputMillis = millis();
+unsigned long lastMessageSignMillis = 0;
+bool messageSignActive = false;
 unsigned long lastSensorReadMillis = 0;
 float temperature_in;
 float temperature_out;
@@ -126,6 +133,10 @@ unsigned int currentMessageLine = 0;
 String messages[DISPLAY_LINES];
 unsigned int storedDialPosTop;
 unsigned int storedDialPosBottom;
+float plotHours[] = { 1.0 / 60, 1.0 / 6, 1, 12, 24, 24 * 7, 24 * 30, 24 * 365 };
+unsigned int plotHoursIdx = 2;
+bool newLogData;
+bool newSensorReadings = false;
 
 // DHT22 TEMP AND HUMIDITY SENSOR
 DHT22 dht22(PIN_DHT);
@@ -169,6 +180,8 @@ void setup() {
   initBmp();
   initDs();
   initSd();
+  //removeDataLogFile();
+  initDataLogFile();
   initWifi();
   initTime();
   // initDht();
@@ -176,21 +189,61 @@ void setup() {
 
   readSensors();
   arbitrateSensorReadings();
-  updateDialPos(motor1, dialStateTop);
-  updateDialPos(motor2, dialStateBottom);
+  getTimeStamp();
+  if (timeClient.isTimeSet()) {
+    logData();
+    updateDialPos(motor1, dialStateTop);
+    updateDialPos(motor2, dialStateBottom);
+
+    encoder_position_prev = encoder_position;
+    lastInputMillis = millis();
+  }
 }
 
 void loop() {
+
+  if (encoder_position != encoder_position_prev || encoder_push_pressed) {
+    lastInputMillis = millis();
+  }
+
   if (millis() - lastInputMillis > DISPLAY_OFF_SEC * 1000) {
     setDisplayOff();
-    displayOn = false;
-  } else {
+  } else if (!displayOn) {
     displayOn = true;
+    // Ignore encoder if display was off
+    encoder_position_prev = encoder_position;
+  }
+
+  if (displayOn) {
+
+    switch (displayState) {
+
+      case DisplayState::PLOT:
+        if (encoder_position_prev != encoder_position) {
+          if (encoder_position_prev < encoder_position) {
+            incPlotTime();
+          } else {
+            decPlotTime();
+          }
+          plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
+          encoder_position_prev = encoder_position;
+        }
+        if (messageSignActive) {
+          while (millis() - lastMessageSignMillis < MESSAGE_SIGN_SEC * 1000) {}
+          messageSignActive = false;
+          plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
+        } else if (newLogData) {
+          plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
+          newLogData = false;
+        }
+        break;
+    }
   }
 
   if (millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000) {
     readSensors();
     arbitrateSensorReadings();
+    getTimeStamp();
     if (timeClient.isTimeSet()) {
       logData();
       //catFileSerial(DATA_LOG_FILE);
@@ -199,14 +252,8 @@ void loop() {
     updateDialPos(motor2, dialStateBottom);
   }
 
-  if (displayOn) {
-    //printSensorReadings();
-    plotData("TempOut", 0.1, dateStamp, timeStamp);
-  }
   motor1->update();
   motor2->update();
-
-  // if (timeClient.isTimeSet())
 }
 
 // INIT FUNCTIONS
@@ -234,6 +281,27 @@ void initDisplay() {
   display.cp437(true);                  // Use full 256 char 'Code Page 437' font
 }
 
+void initDataLogFile() {
+  if (!SD.exists(DATA_LOG_FILE)) {
+    File dataFile = SD.open(DATA_LOG_FILE, FILE_WRITE);
+    if (dataFile) {
+      dataFile.print(DATA_LOG_HEADER);
+      dataFile.print("\r\n");
+      dataFile.close();
+      displayMessage(String(DATA_LOG_FILE) + " created");
+      //catFileSerial(DATA_LOG_FILE);catFileSerial
+    } else {
+      displayMessage("Failed to create + " DATA_LOG_FILE);
+    }
+  }
+}
+
+void removeDataLogFile() {
+  if (SD.exists(DATA_LOG_FILE)) {
+    SD.remove(DATA_LOG_FILE);
+  }
+}
+
 void initSd() {
   // SD CARD READER
   digitalWrite(PIN_SPI_CS_OLED, HIGH);
@@ -244,7 +312,6 @@ void initSd() {
   } else {
     listFiles(SD.open("/"), 0);
     displayMessage("SD card initialized");
-    SD.remove(DATA_LOG_FILE);  // Recreate datalog file each time
     // File file = SD.open("/wifi.txt", FILE_WRITE);
     // if (file) {
     //   Serial.println("Writing to wifi.txt...");
@@ -257,18 +324,6 @@ void initSd() {
     // } else {
     //   Serial.println("Error opening file.");
     // }
-    if (!SD.exists(DATA_LOG_FILE)) {
-      File dataFile = SD.open(DATA_LOG_FILE, FILE_WRITE);
-      if (dataFile) {
-        dataFile.print(DATA_LOG_HEADER);
-        dataFile.print("\r\n");
-        dataFile.close();
-        displayMessage(String(DATA_LOG_FILE) + " created");
-        //catFileSerial(DATA_LOG_FILE);catFileSerial
-      } else {
-        displayMessage("Failed to create + " DATA_LOG_FILE);
-      }
-    }
   }
 }
 
@@ -277,7 +332,8 @@ void initEncoder() {
   pinMode(PIN_ENCODER_CLK, INPUT);
   pinMode(PIN_ENCODER_DT, INPUT);
   pinMode(PIN_ENCODER_SW, INPUT_PULLUP);
-  attachInterrupt(PIN_ENCODER_CLK, isrEncoderClock, CHANGE);
+  attachInterrupt(PIN_ENCODER_CLK, isrEncoder, CHANGE);
+  attachInterrupt(PIN_ENCODER_DT, isrEncoder, CHANGE);
   attachInterrupt(PIN_ENCODER_SW, isrEncoderPush, RISING);
 }
 
@@ -340,22 +396,30 @@ void initSteppers() {
 
 // INTERRUPT FUNCTIONS
 
-void isrEncoderClock() {
-  // if (millis() - lastInputMillis < ENCODER_DEBOUNCE_MILLIS)
+void isrEncoder() {
+  //  if (millis() - lastEncoderInputMillis > ENCODER_DEBOUNCE_MILLIS) {
   bool encoder_clock = digitalRead(PIN_ENCODER_CLK);
+  bool encoder_dt = digitalRead(PIN_ENCODER_DT);
   if (encoder_clock != encoder_clock_prev) {
-    bool encoder_dt = digitalRead(PIN_ENCODER_DT);
     if (encoder_dt != encoder_clock) {
       // encoder_cw_pressed = true;
-      encoder_position++;
+      encoder_position_raw++;
     } else {
       // encoder_ccw_pressed = true;
-      encoder_position--;
+      encoder_position_raw--;
     }
     encoder_clock_prev = encoder_clock;
+    encoder_position = encoder_position_raw / 2;
   }
-  lastInputMillis = millis();
+  //lastInputMillis = millis();
+  //lastEncoderInputMillis = millis();
+  //Serial.print("Clock :");
+  //Serial.println(encoder_clock);
+  //Serial.print("Data :");
+  //Serial.println(encoder_dt);
+  //}
 }
+
 
 // IRAM_ATTR?
 void isrEncoderPush() {
@@ -371,6 +435,7 @@ void arbitrateSensorReadings() {
   temperature_pcb = bmp_temperature;
   pressure = bmp_pressure;
   humidity_rel = dht_humidity_rel;
+  newSensorReadings = true;
 }
 
 void zeroStepper(SwitecX25 *motor) {
@@ -418,40 +483,6 @@ unsigned int valToDialPos(float val, float min, float max) {
   return map_float(val, min, max, 0, DIAL_RANGE_STEPS);
 }
 
-void displayMessage(const String &message) {
-
-  // int newLines = message.length()/DISPLAY_CHARS;
-
-  displayState = DisplayState::MESSAGES;
-
-  // If buffer is full, shift all lines up
-  if (currentMessageLine >= DISPLAY_LINES) {
-    for (int i = 1; i < DISPLAY_LINES; i++) {
-      messages[i - 1] = messages[i];
-    }
-    currentMessageLine--;
-  }
-
-  // Add new line to buffer
-  messages[currentMessageLine] = message;
-  currentMessageLine++;
-
-  // Redraw display
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  for (int i = 0; i < currentMessageLine; i++) {
-    display.setCursor(0, i * 8);  // Each line is 8 pixels tall
-    display.println(messages[i]);
-  }
-
-  display.display();
-
-  Serial.println(message);
-
-  delay(200);
-}
-
 void displayEncoderReadings() {
   bool CLK = true;
   bool DT = true;
@@ -475,6 +506,7 @@ void displayEncoderReadings() {
 }
 
 void setDisplayOff() {
+  displayOn = false;
   display.clearDisplay();
   display.display();
 }
@@ -677,22 +709,15 @@ void logData() {
   // "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
   File file = SD.open(DATA_LOG_FILE, FILE_WRITE);
   if (file) {
+
+    String log =
+      dateStamp + "," + timeStamp + "," + String(temperature_in, 1) + "," + String(temperature_out, 1) + "," + String(temperature_pcb, 1) + "," + String(humidity_rel, 1) + "," + String(pressure, 1) + "\r\n";
+
     file.seek(file.size());
-    file.print(dateStamp);
-    file.print(",");
-    file.print(timeStamp);
-    file.print(",");
-    file.print(temperature_in, 1);
-    file.print(",");
-    file.print(temperature_out, 1);
-    file.print(",");
-    file.print(temperature_pcb, 1);
-    file.print(",");
-    file.print(humidity_rel, 1);
-    file.print(",");
-    file.print(pressure, 1);
-    file.print("\r\n");
+    file.println(log);
+    Serial.println("Log string: " + log);
     file.close();
+    newLogData = true;
   } else {
     displayMessage("Error writing " + String(DATA_LOG_FILE));
   }
@@ -730,134 +755,18 @@ float map_float(float x, float in_min, float in_max, float out_min, float out_ma
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-
-void plotData(const char* var, float hours, String& currentDate, String& currentTime) {
-  File file = SD.open(DATA_LOG_FILE);
-
-  if (!file) {
-    Serial.print("Error opening file ");
-    Serial.println(DATA_LOG_FILE);
-    return;
-  }
-
-  const int maxDataPoints = SCREEN_WIDTH;
-  float data[maxDataPoints];
-  int dataCount = 0;
-  int varIndex = -1;
-
-  DateTime now = DateTime(currentDate.substring(0, 4).toInt(),
-                          currentDate.substring(5, 7).toInt(),
-                          currentDate.substring(8, 10).toInt(),
-                          currentTime.substring(0, 2).toInt(),
-                          currentTime.substring(3, 5).toInt(),
-                          currentTime.substring(6, 8).toInt());
-  DateTime startTime = now - TimeSpan(hours * 3600);
-
-  // Read the header line
-  String headerLine = file.readStringUntil('\n');
-  int commaCount = 0;
-  int startIdx = 0;
-
-  for (int i = 0; i < headerLine.length(); i++) {
-    if (headerLine[i] == ',' || i == headerLine.length() - 1) {
-      String header = headerLine.substring(startIdx, i == headerLine.length() - 1 ? i + 1 : i);
-      if (header.equals(var)) {
-        varIndex = commaCount;
-        break;
-      }
-      commaCount++;
-      startIdx = i + 1;
-    }
-  }
-
-  if (varIndex == -1) {
-    Serial.print("Variable ");
-    Serial.print(var);
-    Serial.println(" not found in header.");
-    file.close();
-    return;
-  }
-
-  // Read data lines
-  while (file.available()) {
-    String line = file.readStringUntil('\n');
-    int commaCount = 0;
-    int startIdx = 0;
-
-    // Extract the date and time
-    String dateStr = "";
-    String timeStr = "";
-    bool isDateFound = false;
-    bool isTimeFound = false;
-    for (int i = 0; i < line.length(); i++) {
-      if (line[i] == ',' || i == line.length() - 1) {
-        if (!isDateFound) {
-          dateStr = line.substring(startIdx, i == line.length() - 1 ? i + 1 : i);
-          isDateFound = true;
-        } else if (!isTimeFound) {
-          timeStr = line.substring(startIdx, i == line.length() - 1 ? i + 1 : i);
-          isTimeFound = true;
-        } else if (commaCount == varIndex) {
-          String dataStr = line.substring(startIdx, i == line.length() - 1 ? i + 1 : i);
-          float value = dataStr.toFloat();
-          DateTime logTime = DateTime(dateStr.substring(0, 4).toInt(),
-                                      dateStr.substring(5, 7).toInt(),
-                                      dateStr.substring(8, 10).toInt(),
-                                      timeStr.substring(0, 2).toInt(),
-                                      timeStr.substring(3, 5).toInt(),
-                                      timeStr.substring(6, 8).toInt());
-          if (logTime >= startTime) {
-            if (dataCount < maxDataPoints) {
-              data[dataCount] = value;
-              dataCount++;
-            } else {
-              // Shift data to the left to make room for new data
-              for (int j = 0; j < maxDataPoints - 1; j++) {
-                data[j] = data[j + 1];
-              }
-              data[maxDataPoints - 1] = value;
-            }
-          }
-          break;
-        }
-        commaCount++;
-        startIdx = i + 1;
-      }
-    }
-  }
-
-  file.close();
-
-  // Find the minimum and maximum data values
-  float minData = data[0];
-  float maxData = data[0];
-  for (int i = 1; i < dataCount; i++) {
-    if (data[i] < minData) {
-      minData = data[i];
-    }
-    if (data[i] > maxData) {
-      maxData = data[i];
-    }
-  }
-
-  // Plot the data
-  display.clearDisplay();
-
-  // Print min and max values to the left of the y-axis
-  display.setCursor(0, 0);
-  display.print((int)maxData); // Print max value at the top
-  display.setCursor(0, SCREEN_HEIGHT - 8);
-  display.print((int)minData); // Print min value at the bottom
-
-  display.drawLine(20, 0, 20, SCREEN_HEIGHT - 1, SSD1306_WHITE); // Y-axis
-  display.drawLine(20, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE); // X-axis
-
-  for (int i = 0; i < dataCount; i++) {
-    int x = 20 + i;
-    int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 1, 0.0); // Reverse y-axis mapping
-    display.drawPixel(x, y, SSD1306_WHITE);
-  }
-
-  display.display();
+int max(int a, int b) {
+  return (a > b) ? a : b;
 }
 
+float max(float a, float b) {
+  return (a > b) ? a : b;
+}
+
+int min(int a, int b) {
+  return (a < b) ? a : b;
+}
+
+float min(float a, float b) {
+  return (a < b) ? a : b;
+}
