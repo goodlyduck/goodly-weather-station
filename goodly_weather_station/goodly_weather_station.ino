@@ -84,11 +84,12 @@ DialState dialStateBottom = DialState::TEMPERATURE_IN;
 #define PIN_DS18B20 5  // ESP32 GPIO pin due to OneWire.h implementation
 
 // USER DEFINES
-#define MESSAGE_SIGN_SEC 1
+#define MESSAGE_SIGN_SEC 0
 #define DISPLAY_OFF_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
 #define SENSOR_READ_INTERV_SEC 10
+#define SENSOR_READ_INPUT_DLY_SEC 5
 //#define SENSOR_READ_INPUT_DLY_SEC 5
 #define SENSOR_VALUE_ERROR = -999
 #define ENCODER_DEBOUNCE_MILLIS 100
@@ -100,6 +101,7 @@ DialState dialStateBottom = DialState::TEMPERATURE_IN;
 // ROTARY ENCODER PUSH BUTTON
 // detachInterrupt(GPIOPin);
 volatile bool encoder_clock_prev;
+volatile bool encoder_dt_prev;
 volatile bool encoder_cw_pressed = false;
 volatile bool encoder_ccw_pressed = false;
 volatile bool encoder_push_pressed = false;
@@ -123,6 +125,7 @@ const char *logQuantities[5] = {
 volatile unsigned long lastInputMillis = millis();
 unsigned long lastMessageSignMillis = 0;
 bool messageSignActive = false;
+bool messageSignActivePrev = false;
 unsigned long lastSensorReadMillis = 0;
 float temperature_in;
 float temperature_out;
@@ -136,6 +139,7 @@ unsigned int storedDialPosBottom;
 float plotHours[] = { 1.0 / 60, 1.0 / 6, 1, 12, 24, 24 * 7, 24 * 30, 24 * 365 };
 unsigned int plotHoursIdx = 2;
 bool newLogData;
+bool updatePlot;
 bool newSensorReadings = false;
 
 // DHT22 TEMP AND HUMIDITY SENSOR
@@ -186,7 +190,6 @@ void setup() {
   initTime();
   // initDht();
   initSteppers();
-
   readSensors();
   arbitrateSensorReadings();
   getTimeStamp();
@@ -194,10 +197,9 @@ void setup() {
     logData();
     updateDialPos(motor1, dialStateTop);
     updateDialPos(motor2, dialStateBottom);
-
-    encoder_position_prev = encoder_position;
-    lastInputMillis = millis();
   }
+  encoder_position_prev = encoder_position;
+  lastInputMillis = millis();
 }
 
 void loop() {
@@ -225,22 +227,25 @@ void loop() {
           } else {
             decPlotTime();
           }
-          plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
           encoder_position_prev = encoder_position;
         }
-        if (messageSignActive) {
-          while (millis() - lastMessageSignMillis < MESSAGE_SIGN_SEC * 1000) {}
+        if (messageSignActive && millis() - lastMessageSignMillis > MESSAGE_SIGN_SEC * 1000) {
           messageSignActive = false;
-          plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
-        } else if (newLogData) {
-          plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
+          updatePlot = true;
+        }
+        if (newLogData && !messageSignActive) {
+          updatePlot = true;
           newLogData = false;
+        }
+        if (updatePlot) {
+          plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
+          updatePlot = false;
         }
         break;
     }
   }
 
-  if (millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000) {
+  if (millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000 && millis() - lastInputMillis > SENSOR_READ_INPUT_DLY_SEC * 1000) {
     readSensors();
     arbitrateSensorReadings();
     getTimeStamp();
@@ -333,7 +338,7 @@ void initEncoder() {
   pinMode(PIN_ENCODER_DT, INPUT);
   pinMode(PIN_ENCODER_SW, INPUT_PULLUP);
   attachInterrupt(PIN_ENCODER_CLK, isrEncoder, CHANGE);
-  attachInterrupt(PIN_ENCODER_DT, isrEncoder, CHANGE);
+  //attachInterrupt(PIN_ENCODER_DT, isrEncoder, CHANGE);
   attachInterrupt(PIN_ENCODER_SW, isrEncoderPush, RISING);
 }
 
@@ -397,34 +402,23 @@ void initSteppers() {
 // INTERRUPT FUNCTIONS
 
 void isrEncoder() {
-  //  if (millis() - lastEncoderInputMillis > ENCODER_DEBOUNCE_MILLIS) {
   bool encoder_clock = digitalRead(PIN_ENCODER_CLK);
-  bool encoder_dt = digitalRead(PIN_ENCODER_DT);
   if (encoder_clock != encoder_clock_prev) {
+    bool encoder_dt = digitalRead(PIN_ENCODER_DT);
     if (encoder_dt != encoder_clock) {
-      // encoder_cw_pressed = true;
       encoder_position_raw++;
     } else {
-      // encoder_ccw_pressed = true;
       encoder_position_raw--;
     }
     encoder_clock_prev = encoder_clock;
     encoder_position = encoder_position_raw / 2;
   }
-  //lastInputMillis = millis();
-  //lastEncoderInputMillis = millis();
-  //Serial.print("Clock :");
-  //Serial.println(encoder_clock);
-  //Serial.print("Data :");
-  //Serial.println(encoder_dt);
-  //}
 }
 
 
 // IRAM_ATTR?
 void isrEncoderPush() {
   encoder_push_pressed = true;
-  lastInputMillis = millis();
 }
 
 // OTHER FUNCTIONS

@@ -136,7 +136,7 @@ void plotData(const char *var, float hours, String &currentDate, String &current
 }
 
 void incPlotTime() {
-  if (plotHoursIdx < sizeof(plotHours)) {
+  if (plotHoursIdx < sizeof(plotHours)/sizeof(plotHours[0]) - 1) {
     plotHoursIdx++;
     displayMessageSignHours(plotHours[plotHoursIdx]);
   }
