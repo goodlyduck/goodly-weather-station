@@ -1,22 +1,28 @@
 void plotData(const char *var, float hours, String &currentDate, String &currentTime) {
-  
-  displayStatePrev = displayState;
-  displayState = DisplayState::PLOT;
+
+  //displayState = DisplayState::PLOT;
 
   File file = SD.open(DATA_LOG_FILE, FILE_READ);
 
   if (!file) {
-    Serial.print("Error opening file ");
-    Serial.println(DATA_LOG_FILE);
+    displayMessage("[Plot]Error opening ");
+    displayMessage(DATA_LOG_FILE);
     return;
   }
 
   const int charWidth = 5;
   const int charHeight = 7;
+  // y-axis label (characters plus margin)
   const int yLabelWidth = charWidth * 4 + 1;
-  const int maxDataPoints = SCREEN_WIDTH - yLabelWidth;
+  // Plot area is width - label - line
+  const int maxDataPoints = SCREEN_WIDTH - yLabelWidth - 1;
   float data[maxDataPoints];
-  int dataCount = 0;
+  for (int i = 0; i < maxDataPoints; i++) {
+    data[i] = INVALID_NUMBER;
+  }
+  //unsigned int dataCount = 0;
+  unsigned int dataIdx = 0;
+  unsigned int dataAvgCount[maxDataPoints] = { 0 };
   int varIndex = -1;
 
   DateTime now = DateTime(currentDate.substring(0, 4).toInt(),
@@ -26,6 +32,9 @@ void plotData(const char *var, float hours, String &currentDate, String &current
                           currentTime.substring(3, 5).toInt(),
                           currentTime.substring(6, 8).toInt());
   DateTime startTime = now - TimeSpan(hours * 3600);
+
+  unsigned int now_epoch = now.unixtime();
+  unsigned int startTime_epoch = startTime.unixtime();
 
   // Read the header line
   String headerLine = file.readStringUntil('\n');
@@ -80,19 +89,22 @@ void plotData(const char *var, float hours, String &currentDate, String &current
                                       timeStr.substring(0, 2).toInt(),
                                       timeStr.substring(3, 5).toInt(),
                                       timeStr.substring(6, 8).toInt());
+
+          unsigned int logTime_epoch = logTime.unixtime();
+
           if (logTime >= startTime) {
-            if (dataCount < maxDataPoints) {
-              data[dataCount] = value;
-              dataCount++;
-            } else {
-              // Shift data to the left to make room for new data
-              for (int j = 0; j < maxDataPoints - 1; j++) {
-                data[j] = data[j + 1];
-              }
-              data[maxDataPoints - 1] = value;
+
+            // map(x, in_min, in_max, out_min, out_max)
+            // Map log points to current time scale
+            unsigned int dataIdx = map(logTime_epoch, startTime_epoch, now_epoch, 0, maxDataPoints - 1);
+
+            // Add data value to plot time index
+            if (dataAvgCount[dataIdx] == 0) {
+              data[dataIdx] = 0;  // Replace INVALID_NUMBER with 0
             }
+            dataAvgCount[dataIdx]++;
+            data[dataIdx] = data[dataIdx] + value;
           }
-          break;
         }
         commaCount++;
         startIdx = i + 1;
@@ -102,14 +114,27 @@ void plotData(const char *var, float hours, String &currentDate, String &current
 
   file.close();
 
+  // Calculate average of plot points with more than one data point
+  for (int i = 0; i < maxDataPoints; i++) {
+    if (dataAvgCount[i] > 1) {
+      data[i] = data[i] / dataAvgCount[i];
+    }
+  }
+
   // Find the minimum and maximum data values
-  float minData = data[0];
-  float maxData = data[0];
-  for (int i = 1; i < dataCount; i++) {
-    if (data[i] < minData) {
+  float minData = INVALID_NUMBER;
+  float maxData = INVALID_NUMBER;
+  for (int i = 0; i < maxDataPoints; i++) {
+    if (minData == INVALID_NUMBER && dataAvgCount[i] > 0) {
       minData = data[i];
     }
-    if (data[i] > maxData) {
+    if (maxData == INVALID_NUMBER && dataAvgCount[i] > 0) {
+      maxData = data[i];
+    }
+    if (data[i] < minData && dataAvgCount[i] > 0) {
+      minData = data[i];
+    }
+    if (data[i] > maxData && dataAvgCount[i] > 0) {
       maxData = data[i];
     }
   }
@@ -123,20 +148,24 @@ void plotData(const char *var, float hours, String &currentDate, String &current
   display.setCursor(0, SCREEN_HEIGHT - charHeight);
   display.print((int)minData);  // Print min value at the bottom
 
-  display.drawLine(yLabelWidth + 1, 0, yLabelWidth + 1, SCREEN_HEIGHT - 1, SSD1306_WHITE);                                // Y-axis
-  display.drawLine(yLabelWidth + 1, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE);  // X-axis
+  // Draw axis lines
+  display.drawLine(yLabelWidth + 2, 0, yLabelWidth + 2, SCREEN_HEIGHT - 1, SSD1306_WHITE);                   // Y-axis
+  display.drawLine(yLabelWidth + 2, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE);  // X-axis
 
-  for (int i = 0; i < dataCount; i++) {
-    int x = yLabelWidth + 1 + i;
-    int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 2, 0.0);  // Reverse y-axis mapping
-    display.drawPixel(x, y, SSD1306_WHITE);
+  // Plot data
+  for (int i = 0; i < maxDataPoints; i++) {
+    if (dataAvgCount[i] > 0) {
+      int x = yLabelWidth + 2 + i;
+      int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 2, 0.0);  // Reverse y-axis mapping
+      display.drawPixel(x, y, SSD1306_WHITE);
+    }
   }
 
   display.display();
 }
 
 void incPlotTime() {
-  if (plotHoursIdx < sizeof(plotHours)/sizeof(plotHours[0]) - 1) {
+  if (plotHoursIdx < sizeof(plotHours) / sizeof(plotHours[0]) - 1) {
     plotHoursIdx++;
     displayMessageSignHours(plotHours[plotHoursIdx]);
   }

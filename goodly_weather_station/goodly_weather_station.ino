@@ -40,18 +40,21 @@ enum class DisplayState {
 };
 
 DisplayState displayState = DisplayState::PLOT;
-DisplayState displayStatePrev = DisplayState::PLOT;
+DisplayState displayStatePrev = DisplayState::INIT;
 
 enum class DialState {
   INIT,
   TEMPERATURE_IN,
   TEMPERATURE_OUT,
   PRESSURE,
-  HUMIDITY
+  HUMIDITY,
+  OFF
 };
 
-DialState dialStateTop = DialState::TEMPERATURE_OUT;
-DialState dialStateBottom = DialState::TEMPERATURE_IN;
+DialState dialStateTop = DialState::OFF;
+DialState dialStateBottom = DialState::OFF;
+//DialState dialStateTop = DialState::TEMPERATURE_OUT;
+//DialState dialStateBottom = DialState::TEMPERATURE_IN;
 
 // DIAL LIMITS
 #define DIAL_TEMPERATURE_MAX 35
@@ -84,11 +87,13 @@ DialState dialStateBottom = DialState::TEMPERATURE_IN;
 #define PIN_DS18B20 5  // ESP32 GPIO pin due to OneWire.h implementation
 
 // USER DEFINES
-#define MESSAGE_SIGN_SEC 0
+#define DIALS_ENABLE 0
+#define INVALID_NUMBER -9999
+#define MESSAGE_SIGN_SEC 1
 #define DISPLAY_OFF_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
-#define SENSOR_READ_INTERV_SEC 10
+#define SENSOR_READ_INTERV_SEC 30
 #define SENSOR_READ_INPUT_DLY_SEC 5
 //#define SENSOR_READ_INPUT_DLY_SEC 5
 #define SENSOR_VALUE_ERROR = -999
@@ -102,12 +107,11 @@ DialState dialStateBottom = DialState::TEMPERATURE_IN;
 // detachInterrupt(GPIOPin);
 volatile bool encoder_clock_prev;
 volatile bool encoder_dt_prev;
-volatile bool encoder_cw_pressed = false;
-volatile bool encoder_ccw_pressed = false;
 volatile bool encoder_push_pressed = false;
+bool encPushdPrev = false;
 volatile int encoder_position = 0;
 volatile int encoder_position_raw = 0;
-int encoder_position_prev = 0;
+int encPosPrev = 0;
 volatile unsigned long lastEncoderInputMillis = millis();
 
 // USER CONSTANTS
@@ -136,7 +140,7 @@ unsigned int currentMessageLine = 0;
 String messages[DISPLAY_LINES];
 unsigned int storedDialPosTop;
 unsigned int storedDialPosBottom;
-float plotHours[] = { 1.0 / 60, 1.0 / 6, 1, 12, 24, 24 * 7, 24 * 30, 24 * 365 };
+float plotHours[] = { 1.0 / 60, 1.0 / 6, 1, 12, 24, 24 * 7, 24 * 30, 24 * 365, 24 * 365 * 2, 24 * 365 * 5, 24 * 365 * 10, 24 * 365 * 20, 24 * 365 * 50, 24 * 365 * 100 };
 unsigned int plotHoursIdx = 2;
 bool newLogData;
 bool updatePlot;
@@ -165,7 +169,7 @@ float ds_temperature;
 // #define DIAL_RANGE_DEG 216 // Limited to front markings
 #define DIAL_RANGE_DEG 252  // Limited to front markings plus one more
 #define DIAL_RANGE_STEPS (DIAL_RANGE_DEG * 3)
-#define DIAL_CAL_STEPS 2
+#define DIAL_CAL_STEPS 20
 // SwitecX25 motor1(STEPS,9,7,5,3);
 SwitecX25 *motor1;
 SwitecX25 *motor2;
@@ -176,6 +180,7 @@ SwitecX25 *motor2;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
                          &SPI, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
 bool displayOn = true;
+bool displayOnPrev = false;
 
 void setup() {
   initSerial();
@@ -189,45 +194,56 @@ void setup() {
   initWifi();
   initTime();
   // initDht();
+  if (DIALS_ENABLE) {}
   initSteppers();
   readSensors();
   arbitrateSensorReadings();
   getTimeStamp();
   if (timeClient.isTimeSet()) {
     logData();
-    updateDialPos(motor1, dialStateTop);
-    updateDialPos(motor2, dialStateBottom);
   }
-  encoder_position_prev = encoder_position;
+  updateDialPos(motor1, dialStateTop);
+  updateDialPos(motor2, dialStateBottom);
+
+  encPosPrev = encoder_position;
   lastInputMillis = millis();
 }
 
 void loop() {
 
-  if (encoder_position != encoder_position_prev || encoder_push_pressed) {
+  int encPos = encoder_position;
+  bool encPushd = encoder_push_pressed;
+
+  if (encPos != encPosPrev || (encPushd && !encPushdPrev)) {
     lastInputMillis = millis();
   }
 
-  if (millis() - lastInputMillis > DISPLAY_OFF_SEC * 1000) {
-    setDisplayOff();
-  } else if (!displayOn) {
+  if (millis() - lastInputMillis < DISPLAY_OFF_SEC * 1000) {
     displayOn = true;
+  } else {
+    setDisplayOff();
+  }
+
+  if (displayOn && !displayOnPrev) {
     // Ignore encoder if display was off
-    encoder_position_prev = encoder_position;
+    encPosPrev = encPos;
   }
 
   if (displayOn) {
 
     switch (displayState) {
 
+      case DisplayState::SENSORS:
+        printSensorReadings();
+        break;
+
       case DisplayState::PLOT:
-        if (encoder_position_prev != encoder_position) {
-          if (encoder_position_prev < encoder_position) {
+        if (encPosPrev != encPos) {
+          if (encPosPrev < encPos) {
             incPlotTime();
           } else {
             decPlotTime();
           }
-          encoder_position_prev = encoder_position;
         }
         if (messageSignActive && millis() - lastMessageSignMillis > MESSAGE_SIGN_SEC * 1000) {
           messageSignActive = false;
@@ -241,11 +257,14 @@ void loop() {
           plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
           updatePlot = false;
         }
+        if (displayStatePrev != DisplayState::PLOT) {
+          displayMessageSignHours(plotHours[plotHoursIdx]);
+        }
         break;
     }
   }
 
-  if (millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000 && millis() - lastInputMillis > SENSOR_READ_INPUT_DLY_SEC * 1000) {
+  if ((millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000) && (millis() - lastInputMillis > SENSOR_READ_INPUT_DLY_SEC * 1000)) {
     readSensors();
     arbitrateSensorReadings();
     getTimeStamp();
@@ -259,6 +278,11 @@ void loop() {
 
   motor1->update();
   motor2->update();
+
+  encPosPrev = encPos;
+  encPushdPrev = encPushd;
+  displayOnPrev = displayOn;
+  displayStatePrev = displayState;
 }
 
 // INIT FUNCTIONS
@@ -304,6 +328,7 @@ void initDataLogFile() {
 void removeDataLogFile() {
   if (SD.exists(DATA_LOG_FILE)) {
     SD.remove(DATA_LOG_FILE);
+    displayMessage(String(DATA_LOG_FILE) + " deleted");
   }
 }
 
