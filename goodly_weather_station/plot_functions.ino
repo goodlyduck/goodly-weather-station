@@ -44,6 +44,7 @@ void plotData(const char *var, float hours, String &currentDate, String &current
   for (int i = 0; i < headerLine.length(); i++) {
     if (headerLine[i] == ',' || i == headerLine.length() - 1) {
       String header = headerLine.substring(startIdx, i == headerLine.length() - 1 ? i + 1 : i);
+      header.trim();
       if (header.equals(var)) {
         varIndex = commaCount;
         break;

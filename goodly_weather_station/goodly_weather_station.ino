@@ -33,13 +33,10 @@ enum class DisplayState {
   INIT,
   SENSORS,
   MENU,
-  MENU_SET_TIME,
-  MENU_ZERO_MOTOR_1,
-  MENU_ZERO_MOTOR_2,
   PLOT
 };
 
-DisplayState displayState = DisplayState::PLOT;
+DisplayState displayState = DisplayState::MENU;
 DisplayState displayStatePrev = DisplayState::INIT;
 
 enum class DialState {
@@ -87,7 +84,6 @@ DialState dialStateBottom = DialState::OFF;
 #define PIN_DS18B20 5  // ESP32 GPIO pin due to OneWire.h implementation
 
 // USER DEFINES
-#define DIALS_ENABLE 0
 #define INVALID_NUMBER -9999
 #define MESSAGE_SIGN_SEC 1
 #define DISPLAY_OFF_SEC 60
@@ -117,13 +113,7 @@ volatile unsigned long lastEncoderInputMillis = millis();
 // USER CONSTANTS
 const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 0;
-const char *logQuantities[5] = {
-  "TempIn",
-  "TempOut",
-  "TempPcb",
-  "HumidityIn",
-  "PressureIn"
-};
+
 
 // USER VARIABLES
 volatile unsigned long lastInputMillis = millis();
@@ -145,6 +135,32 @@ unsigned int plotHoursIdx = 2;
 bool newLogData;
 bool updatePlot;
 bool newSensorReadings = false;
+
+// Menu
+unsigned int menuSelIdx = 0;
+const char *menus[] = { "Main", "Plot", "Settings" };
+unsigned int menusIdx = 0;
+const unsigned int menusLengths[] = { 3, 5, 3 };
+const char *menuContents[][5] = {
+  { "Plot",
+    "Sensors",
+    "Settings" },
+  { "Indoor temperature",
+    "Outdoor temperature",
+    "Pressure",
+    "Humidity",
+    "PCB temperature" }
+};
+
+const char *plotVars[] = {
+  "TempIn",
+  "TempOut",
+  "PressureIn",
+  "HumidityIn",
+  "TempPcb"
+};
+int plotVarsIdx = 0;
+
 
 // DHT22 TEMP AND HUMIDITY SENSOR
 DHT22 dht22(PIN_DHT);
@@ -194,7 +210,6 @@ void setup() {
   initWifi();
   initTime();
   // initDht();
-  if (DIALS_ENABLE) {}
   initSteppers();
   readSensors();
   arbitrateSensorReadings();
@@ -206,6 +221,7 @@ void setup() {
   updateDialPos(motor2, dialStateBottom);
 
   encPosPrev = encoder_position;
+  encPushdPrev = true;
   lastInputMillis = millis();
 }
 
@@ -213,6 +229,7 @@ void loop() {
 
   int encPos = encoder_position;
   bool encPushd = encoder_push_pressed;
+  encoder_push_pressed = false;
 
   if (encPos != encPosPrev || (encPushd && !encPushdPrev)) {
     lastInputMillis = millis();
@@ -233,8 +250,42 @@ void loop() {
 
     switch (displayState) {
 
+      case DisplayState::MENU:
+        if (displayStatePrev != displayState) {
+          menuSelIdx = 0;
+        }
+        displayMenu(menuContents[menusIdx], menusLengths[menusIdx], menuSelIdx);
+        if (encPos > encPosPrev && menuSelIdx < menusLengths[menusIdx] - 1) {
+          menuSelIdx++;
+        } else if (encPos < encPosPrev && menuSelIdx > 0) {
+          menuSelIdx--;
+        } else if (encPushd && !encPushdPrev) {
+          switch (menusIdx) {
+            case 0:  // Main
+              switch (menuSelIdx) {
+                case 0:  // Plot
+                  menusIdx = 1;
+                  break;
+                case 1:  // Sensors
+                  displayState = DisplayState::SENSORS;
+                  break;
+              }
+              break;
+            case 1:  // Plot
+              plotVarsIdx = menuSelIdx;
+              displayState = DisplayState::PLOT;
+              menusIdx = 0;
+              break;
+          }
+          menuSelIdx = 0;
+        }
+        break;
+
       case DisplayState::SENSORS:
         printSensorReadings();
+        if (encPushd && !encPushdPrev) {
+          displayState = DisplayState::MENU;
+        }
         break;
 
       case DisplayState::PLOT:
@@ -254,11 +305,14 @@ void loop() {
           newLogData = false;
         }
         if (updatePlot) {
-          plotData("TempOut", plotHours[plotHoursIdx], dateStamp, timeStamp);
+          plotData(plotVars[plotVarsIdx], plotHours[plotHoursIdx], dateStamp, timeStamp);
           updatePlot = false;
         }
         if (displayStatePrev != DisplayState::PLOT) {
           displayMessageSignHours(plotHours[plotHoursIdx]);
+        }
+        if (encPushd && !encPushdPrev) {
+          displayState = DisplayState::MENU;
         }
         break;
     }
@@ -472,6 +526,7 @@ void zeroStepper(SwitecX25 *motor) {
     }
     motor->update();
   }
+  encoder_push_pressed = false;
   motor->setCurrentStep(DIAL_RANGE_STEPS / 2);
 }
 
