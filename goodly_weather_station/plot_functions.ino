@@ -1,7 +1,5 @@
 void plotData(const char *var, float hours, String &currentDate, String &currentTime) {
 
-  //displayState = DisplayState::PLOT;
-
   File file = SD.open(DATA_LOG_FILE, FILE_READ);
 
   if (!file) {
@@ -10,15 +8,19 @@ void plotData(const char *var, float hours, String &currentDate, String &current
     return;
   }
 
-  const int charWidth = 5;
+  const int charWidth = 6;
   const int charHeight = 7;
   // y-axis label (characters plus margin)
   const int yLabelWidth = charWidth * 4 + 1;
   // Plot area is width - label - line
   const int maxDataPoints = SCREEN_WIDTH - yLabelWidth - 1;
   float data[maxDataPoints];
+  float dataMax[maxDataPoints];
+  float dataMin[maxDataPoints];
   for (int i = 0; i < maxDataPoints; i++) {
     data[i] = INVALID_NUMBER;
+    dataMax[i] = INVALID_NUMBER;
+    dataMin[i] = INVALID_NUMBER;
   }
   //unsigned int dataCount = 0;
   unsigned int dataIdx = 0;
@@ -84,6 +86,7 @@ void plotData(const char *var, float hours, String &currentDate, String &current
         } else if (commaCount == varIndex) {
           String dataStr = line.substring(startIdx, i == line.length() - 1 ? i + 1 : i);
           float value = dataStr.toFloat();
+
           DateTime logTime = DateTime(dateStr.substring(0, 4).toInt(),
                                       dateStr.substring(5, 7).toInt(),
                                       dateStr.substring(8, 10).toInt(),
@@ -93,18 +96,22 @@ void plotData(const char *var, float hours, String &currentDate, String &current
 
           unsigned int logTime_epoch = logTime.unixtime();
 
-          if (logTime >= startTime) {
+          if (logTime >= startTime && dataStr != "NaN") {
 
             // map(x, in_min, in_max, out_min, out_max)
             // Map log points to current time scale
             unsigned int dataIdx = map(logTime_epoch, startTime_epoch, now_epoch, 0, maxDataPoints - 1);
 
             // Add data value to plot time index
-            if (dataAvgCount[dataIdx] == 0) {
-              data[dataIdx] = 0;  // Replace INVALID_NUMBER with 0
+            if (dataAvgCount[dataIdx] == 0) {  // No data added to this time point yet
+              data[dataIdx] = 0;               // Replace INVALID_NUMBER with 0
+              dataMax[dataIdx] = value;
+              dataMin[dataIdx] = value;
             }
             dataAvgCount[dataIdx]++;
             data[dataIdx] = data[dataIdx] + value;
+            dataMax[dataIdx] = max(dataMax[dataIdx], value);
+            dataMin[dataIdx] = min(dataMin[dataIdx], value);
           }
         }
         commaCount++;
@@ -122,9 +129,12 @@ void plotData(const char *var, float hours, String &currentDate, String &current
     }
   }
 
+  // TODO find min/max of dataMax/dataMin and plot the range
+
   // Find the minimum and maximum data values
   float minData = INVALID_NUMBER;
   float maxData = INVALID_NUMBER;
+
   for (int i = 0; i < maxDataPoints; i++) {
     if (minData == INVALID_NUMBER && dataAvgCount[i] > 0) {
       minData = data[i];
@@ -144,20 +154,20 @@ void plotData(const char *var, float hours, String &currentDate, String &current
   display.clearDisplay();
 
   // Print min and max values to the left of the y-axis
-  display.setCursor(0, 0);
+  display.setCursor(0, SCREEN_MARGIN_TOP);
   display.print((int)maxData);  // Print max value at the top
   display.setCursor(0, SCREEN_HEIGHT - charHeight);
   display.print((int)minData);  // Print min value at the bottom
 
   // Draw axis lines
-  display.drawLine(yLabelWidth + 2, 0, yLabelWidth + 2, SCREEN_HEIGHT - 1, SSD1306_WHITE);                   // Y-axis
+  display.drawLine(yLabelWidth + 2, SCREEN_MARGIN_TOP, yLabelWidth + 2, SCREEN_HEIGHT - 1, SSD1306_WHITE);   // Y-axis
   display.drawLine(yLabelWidth + 2, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE);  // X-axis
 
   // Plot data
   for (int i = 0; i < maxDataPoints; i++) {
     if (dataAvgCount[i] > 0) {
       int x = yLabelWidth + 2 + i;
-      int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 2, 0.0);  // Reverse y-axis mapping
+      int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);  // Reverse y-axis mapping
       display.drawPixel(x, y, SSD1306_WHITE);
     }
   }

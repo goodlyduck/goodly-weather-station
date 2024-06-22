@@ -99,16 +99,27 @@ DialState dialStateBottom = DialState::OFF;
 #define DIAL_POS_FILE "/dialpos.txt"
 #define WIFI_FILE "/wifi.txt"
 
+#define TEMP_PLAUS_MIN -60
+#define TEMP_PLAUS_MAX 60
+#define PRES_PLAUS_MIN 800
+#define PRES_PLAUS_MAX 1200
+#define HUM_PLAUS_MIN 0
+#define HUM_PLAUS_MAX 100
+
 // ROTARY ENCODER PUSH BUTTON
 // detachInterrupt(GPIOPin);
+// Interrupt variables
 volatile bool encoder_clock_prev;
 volatile bool encoder_dt_prev;
 volatile bool encoder_push_pressed = false;
-bool encPushdPrev = false;
 volatile int encoder_position = 0;
 volatile int encoder_position_raw = 0;
+// Loop encoder variables
+int encPos = 0;
 int encPosPrev = 0;
-volatile unsigned long lastEncoderInputMillis = millis();
+bool encPushd = false;
+bool encPushdPrev = false;
+unsigned long lastEncoderInputMillis = millis();
 
 // USER CONSTANTS
 const char *ntpServer = "pool.ntp.org";
@@ -120,12 +131,18 @@ volatile unsigned long lastInputMillis = millis();
 unsigned long lastMessageSignMillis = 0;
 bool messageSignActive = false;
 bool messageSignActivePrev = false;
+bool plotUseRange = true;
 unsigned long lastSensorReadMillis = 0;
 float temperature_in;
 float temperature_out;
 float temperature_pcb;
 float pressure;
 float humidity_rel;
+bool temperature_in_ok = false;
+bool temperature_out_ok = false;
+bool temperature_pcb_ok = false;
+bool pressure_ok = false;
+bool humidity_rel_ok = false;
 unsigned int currentMessageLine = 0;
 String messages[DISPLAY_LINES];
 unsigned int storedDialPosTop;
@@ -193,6 +210,8 @@ SwitecX25 *motor2;
 // OLED DISPLAY DEFINES
 #define SCREEN_WIDTH 128  // OLED display width, in pixels
 #define SCREEN_HEIGHT 64  // OLED display height, in pixels
+#define SCREEN_MARGIN_TOP 5
+#define SCREEN_MARGIN_LEFT 5
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
                          &SPI, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
 bool displayOn = true;
@@ -227,16 +246,14 @@ void setup() {
 
 void loop() {
 
-  int encPos = encoder_position;
-  bool encPushd = encoder_push_pressed;
-  encoder_push_pressed = false;
+  getEncoder();
 
   if (encPos != encPosPrev || (encPushd && !encPushdPrev)) {
     lastInputMillis = millis();
   }
 
   if (millis() - lastInputMillis < DISPLAY_OFF_SEC * 1000) {
-    displayOn = true;
+    setDisplayOn();
   } else {
     setDisplayOff();
   }
@@ -253,6 +270,7 @@ void loop() {
       case DisplayState::MENU:
         if (displayStatePrev != displayState) {
           menuSelIdx = 0;
+          displayStatePrev = displayState;
         }
         displayMenu(menuContents[menusIdx], menusLengths[menusIdx], menuSelIdx);
         if (encPos > encPosPrev && menuSelIdx < menusLengths[menusIdx] - 1) {
@@ -267,13 +285,13 @@ void loop() {
                   menusIdx = 1;
                   break;
                 case 1:  // Sensors
-                  displayState = DisplayState::SENSORS;
+                  setDisplayState(DisplayState::SENSORS);
                   break;
               }
               break;
             case 1:  // Plot
               plotVarsIdx = menuSelIdx;
-              displayState = DisplayState::PLOT;
+              setDisplayState(DisplayState::PLOT);
               menusIdx = 0;
               break;
           }
@@ -284,7 +302,7 @@ void loop() {
       case DisplayState::SENSORS:
         printSensorReadings();
         if (encPushd && !encPushdPrev) {
-          displayState = DisplayState::MENU;
+          setDisplayState(DisplayState::MENU);
         }
         break;
 
@@ -308,11 +326,12 @@ void loop() {
           plotData(plotVars[plotVarsIdx], plotHours[plotHoursIdx], dateStamp, timeStamp);
           updatePlot = false;
         }
-        if (displayStatePrev != DisplayState::PLOT) {
+        if (displayStatePrev != displayState) {
           displayMessageSignHours(plotHours[plotHoursIdx]);
+          displayStatePrev = displayState;
         }
         if (encPushd && !encPushdPrev) {
-          displayState = DisplayState::MENU;
+          setDisplayState(DisplayState::MENU);
         }
         break;
     }
@@ -332,11 +351,6 @@ void loop() {
 
   motor1->update();
   motor2->update();
-
-  encPosPrev = encPos;
-  encPushdPrev = encPushd;
-  displayOnPrev = displayOn;
-  displayStatePrev = displayState;
 }
 
 // INIT FUNCTIONS
@@ -503,11 +517,36 @@ void isrEncoderPush() {
 // OTHER FUNCTIONS
 
 void arbitrateSensorReadings() {
-  temperature_in = dht_temperature;
-  temperature_out = ds_temperature;
-  temperature_pcb = bmp_temperature;
-  pressure = bmp_pressure;
-  humidity_rel = dht_humidity_rel;
+  if (dht_temperature > TEMP_PLAUS_MIN && dht_temperature < TEMP_PLAUS_MAX) {
+    temperature_in = dht_temperature;
+    temperature_in_ok = true;
+  } else {
+    temperature_in_ok = false;
+  }
+  if (ds_temperature > TEMP_PLAUS_MIN && ds_temperature < TEMP_PLAUS_MAX) {
+    temperature_out = ds_temperature;
+    temperature_out_ok = true;
+  } else {
+    temperature_out_ok = false;
+  }
+  if (bmp_temperature > TEMP_PLAUS_MIN && bmp_temperature < TEMP_PLAUS_MAX) {
+    temperature_pcb = bmp_temperature;
+    temperature_pcb_ok = true;
+  } else {
+    temperature_pcb_ok = false;
+  }
+  if (bmp_pressure > PRES_PLAUS_MIN && bmp_pressure < PRES_PLAUS_MAX) {
+    pressure = bmp_pressure;
+    pressure_ok = true;
+  } else {
+    pressure_ok = false;
+  }
+  if (dht_humidity_rel > HUM_PLAUS_MIN && dht_humidity_rel < HUM_PLAUS_MAX) {
+    humidity_rel = dht_humidity_rel;
+    humidity_rel_ok = true;
+  } else {
+    humidity_rel_ok = false;
+  }
   newSensorReadings = true;
 }
 
@@ -557,6 +596,14 @@ unsigned int valToDialPos(float val, float min, float max) {
   return map_float(val, min, max, 0, DIAL_RANGE_STEPS);
 }
 
+void getEncoder() {
+  encPosPrev = encPos;
+  encPos = encoder_position;
+  encPushdPrev = encPushd;
+  encPushd = encoder_push_pressed;
+  encoder_push_pressed = false;
+}
+
 void displayEncoderReadings() {
   bool CLK = true;
   bool DT = true;
@@ -580,9 +627,20 @@ void displayEncoderReadings() {
 }
 
 void setDisplayOff() {
+  displayOnPrev = displayOn;
   displayOn = false;
   display.clearDisplay();
   display.display();
+}
+
+void setDisplayOn() {
+  displayOnPrev = displayOn;
+  displayOn = true;
+}
+
+void setDisplayState(DisplayState newState) {
+  displayStatePrev = displayState;
+  displayState = newState;
 }
 
 void readBmp() {
@@ -638,7 +696,7 @@ void printSensorReadings() {
   display.print("\n");
 
   display.print("Encoder: ");
-  display.print(encoder_position);
+  display.print(encPos);
 
   display.display();
 }
@@ -784,8 +842,14 @@ void logData() {
   File file = SD.open(DATA_LOG_FILE, FILE_WRITE);
   if (file) {
 
+    String tempIn = (temperature_in_ok) ? String(temperature_in, 1) : "NaN";
+    String tempOut = (temperature_out_ok) ? String(temperature_out, 1) : "NaN";
+    String tempPcb = (temperature_pcb_ok) ? String(temperature_pcb, 1) : "NaN";
+    String hum = (humidity_rel_ok) ? String(humidity_rel, 1) : "NaN";
+    String pres = (pressure_ok) ? String(pressure, 1) : "NaN";
+
     String log =
-      dateStamp + "," + timeStamp + "," + String(temperature_in, 1) + "," + String(temperature_out, 1) + "," + String(temperature_pcb, 1) + "," + String(humidity_rel, 1) + "," + String(pressure, 1) + "\r\n";
+      dateStamp + "," + timeStamp + "," + tempIn + "," + tempOut + "," + tempPcb + "," + hum + "," + pres + "\r\n";
 
     file.seek(file.size());
     file.println(log);

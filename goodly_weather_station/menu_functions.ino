@@ -6,7 +6,7 @@ void displayMenu(const char* items[], int length, int index) {
     } else {
       display.setTextColor(SSD1306_WHITE);
     }
-    display.setCursor(0, i * 10);
+    display.setCursor(SCREEN_MARGIN_LEFT, SCREEN_MARGIN_TOP + i * 10);
     display.print(items[i]);
   }
   display.display();
