@@ -23,8 +23,8 @@ void plotData(const char *var, float hours, String &currentDate, String &current
     dataMin[i] = INVALID_NUMBER;
   }
   //unsigned int dataCount = 0;
-  unsigned int dataIdx = 0;
-  unsigned int dataAvgCount[maxDataPoints] = { 0 };
+  unsigned int dataTimeIdx = 0;
+  unsigned int dataCount[maxDataPoints] = { 0 };
   int varIndex = -1;
 
   DateTime now = DateTime(currentDate.substring(0, 4).toInt(),
@@ -100,18 +100,18 @@ void plotData(const char *var, float hours, String &currentDate, String &current
 
             // map(x, in_min, in_max, out_min, out_max)
             // Map log points to current time scale
-            unsigned int dataIdx = map(logTime_epoch, startTime_epoch, now_epoch, 0, maxDataPoints - 1);
+            unsigned int dataTimeIdx = map(logTime_epoch, startTime_epoch, now_epoch, 0, maxDataPoints - 1);
 
             // Add data value to plot time index
-            if (dataAvgCount[dataIdx] == 0) {  // No data added to this time point yet
-              data[dataIdx] = 0;               // Replace INVALID_NUMBER with 0
-              dataMax[dataIdx] = value;
-              dataMin[dataIdx] = value;
+            if (dataCount[dataTimeIdx] == 0) {  // No data added to this time point yet
+              data[dataTimeIdx] = 0;            // Replace INVALID_NUMBER with 0
+              dataMax[dataTimeIdx] = value;
+              dataMin[dataTimeIdx] = value;
             }
-            dataAvgCount[dataIdx]++;
-            data[dataIdx] = data[dataIdx] + value;
-            dataMax[dataIdx] = max(dataMax[dataIdx], value);
-            dataMin[dataIdx] = min(dataMin[dataIdx], value);
+            dataCount[dataTimeIdx]++;
+            data[dataTimeIdx] = data[dataTimeIdx] + value;
+            dataMax[dataTimeIdx] = max(dataMax[dataTimeIdx], value);
+            dataMin[dataTimeIdx] = min(dataMin[dataTimeIdx], value);
           }
         }
         commaCount++;
@@ -124,29 +124,42 @@ void plotData(const char *var, float hours, String &currentDate, String &current
 
   // Calculate average of plot points with more than one data point
   for (int i = 0; i < maxDataPoints; i++) {
-    if (dataAvgCount[i] > 1) {
-      data[i] = data[i] / dataAvgCount[i];
+    if (dataCount[i] > 1) {
+      data[i] = data[i] / dataCount[i];
     }
   }
-
-  // TODO find min/max of dataMax/dataMin and plot the range
 
   // Find the minimum and maximum data values
   float minData = INVALID_NUMBER;
   float maxData = INVALID_NUMBER;
 
   for (int i = 0; i < maxDataPoints; i++) {
-    if (minData == INVALID_NUMBER && dataAvgCount[i] > 0) {
-      minData = data[i];
-    }
-    if (maxData == INVALID_NUMBER && dataAvgCount[i] > 0) {
-      maxData = data[i];
-    }
-    if (data[i] < minData && dataAvgCount[i] > 0) {
-      minData = data[i];
-    }
-    if (data[i] > maxData && dataAvgCount[i] > 0) {
-      maxData = data[i];
+    if (plotUseRange) {
+      if (minData == INVALID_NUMBER && dataCount[i] > 0) {
+        minData = dataMin[i];
+      }
+      if (maxData == INVALID_NUMBER && dataCount[i] > 0) {
+        maxData = dataMin[i];
+      }
+      if (dataMin[i] < minData && dataCount[i] > 0) {
+        minData = dataMin[i];
+      }
+      if (dataMax[i] > maxData && dataCount[i] > 0) {
+        maxData = dataMax[i];
+      }
+    } else {
+      if (minData == INVALID_NUMBER && dataCount[i] > 0) {
+        minData = data[i];
+      }
+      if (maxData == INVALID_NUMBER && dataCount[i] > 0) {
+        maxData = data[i];
+      }
+      if (data[i] < minData && dataCount[i] > 0) {
+        minData = data[i];
+      }
+      if (data[i] > maxData && dataCount[i] > 0) {
+        maxData = data[i];
+      }
     }
   }
 
@@ -165,10 +178,16 @@ void plotData(const char *var, float hours, String &currentDate, String &current
 
   // Plot data
   for (int i = 0; i < maxDataPoints; i++) {
-    if (dataAvgCount[i] > 0) {
+    if (dataCount[i] > 0) {
       int x = yLabelWidth + 2 + i;
-      int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);  // Reverse y-axis mapping
-      display.drawPixel(x, y, SSD1306_WHITE);
+      if (plotUseRange) {
+        int y1 = map_float(dataMin[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);
+        int y2 = map_float(dataMax[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);
+        display.drawLine(x, y1, x, y2, SSD1306_WHITE);
+      } else {
+        int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);  // Reverse y-axis mapping
+        display.drawPixel(x, y, SSD1306_WHITE);
+      }
     }
   }
 
