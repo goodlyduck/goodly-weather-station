@@ -1,4 +1,4 @@
-void plotData(const char *var, float hours, String &currentDate, String &currentTime) {
+void plotData(const char *var, float hours, String &currentDate, String &currentTime, const char *title) {
 
   File file = SD.open(DATA_LOG_FILE, FILE_READ);
 
@@ -172,6 +172,25 @@ void plotData(const char *var, float hours, String &currentDate, String &current
   display.setCursor(0, SCREEN_HEIGHT - charHeight);
   display.print((int)minData);  // Print min value at the bottom
 
+  // Print plot name
+  display.setCursor(0, 10*2);
+  display.print(title);
+
+  // Print plot time
+  display.setCursor(0, 10*4);
+  float minutes = hours * 60;
+  float days = hours / 24;
+  float years = days / 365;
+  if (hours < 1) {
+    display.print(String(minutes, 0) + "m");
+  } else if (days > 0.99 &&  years < 1) {
+    display.print(String(days, 0) + "d");
+  } else if (years > 0.99) {
+    display.print(String(years, 0) + "y");
+  } else {
+    display.print(String(hours, 0) + "h");
+  }
+
   // Draw axis lines
   display.drawLine(yLabelWidth + 2, SCREEN_MARGIN_TOP, yLabelWidth + 2, SCREEN_HEIGHT - 1, SSD1306_WHITE);   // Y-axis
   display.drawLine(yLabelWidth + 2, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE);  // X-axis
@@ -197,13 +216,13 @@ void plotData(const char *var, float hours, String &currentDate, String &current
 void incPlotTime() {
   if (plotHoursIdx < sizeof(plotHours) / sizeof(plotHours[0]) - 1) {
     plotHoursIdx++;
-    displayMessageSignHours(plotHours[plotHoursIdx]);
+    //displayMessageSignHours(plotHours[plotHoursIdx]);
   }
 }
 
 void decPlotTime() {
   if (plotHoursIdx > 0) {
     plotHoursIdx--;
-    displayMessageSignHours(plotHours[plotHoursIdx]);
+    //displayMessageSignHours(plotHours[plotHoursIdx]);
   }
 }

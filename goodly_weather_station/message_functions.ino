@@ -1,5 +1,8 @@
 void displayMessage(const String &message) {
 
+  lastMessageMillis = millis();
+  messageActive = true;
+
   // If buffer is full, shift all lines up
   if (currentMessageLine >= DISPLAY_LINES) {
     for (int i = 1; i < DISPLAY_LINES; i++) {

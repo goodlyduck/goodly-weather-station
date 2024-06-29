@@ -8,10 +8,12 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <OneWire.h>
 //#include <time.h>
 #include <DHT22.h>
 #include <RTClib.h>
-#include <DS18B20.h>
+//#include <DS18B20.h>
+#include <DallasTemperature.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_Sensor.h>
@@ -81,11 +83,11 @@ DialState dialStateBottom = DialState::OFF;
 #define PIN_ENCODER_DT 4
 #define PIN_ENCODER_SW 3
 
-#define PIN_DS18B20 5  // ESP32 GPIO pin due to OneWire.h implementation
+#define PIN_ONEWIRE 5  // ESP32 GPIO pin due to OneWire.h implementation
 
 // USER DEFINES
 #define INVALID_NUMBER -9999
-#define MESSAGE_SIGN_SEC 1
+#define MESSAGE_SIGN_SEC 0.5
 #define DISPLAY_OFF_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
@@ -128,6 +130,9 @@ const long gmtOffset_sec = 0;
 
 // USER VARIABLES
 volatile unsigned long lastInputMillis = millis();
+unsigned long lastMessageMillis = 0;
+bool messageActive = false;
+bool messageActivePrev = false;
 unsigned long lastMessageSignMillis = 0;
 bool messageSignActive = false;
 bool messageSignActivePrev = false;
@@ -157,16 +162,19 @@ bool newSensorReadings = false;
 unsigned int menuSelIdx = 0;
 const char *menus[] = { "Main", "Plot", "Settings" };
 unsigned int menusIdx = 0;
-const unsigned int menusLengths[] = { 3, 5, 3 };
+const unsigned int menusLengths[] = { 4, 5, 2 };
 const char *menuContents[][5] = {
   { "Plot",
     "Sensors",
-    "Settings" },
+    "Settings",
+    "Forecast" },
   { "Indoor temperature",
     "Outdoor temperature",
     "Pressure",
     "Humidity",
-    "PCB temperature" }
+    "PCB temperature" },
+  { "Clear log",
+    "Return" }
 };
 
 const char *plotVars[] = {
@@ -176,6 +184,13 @@ const char *plotVars[] = {
   "HumidityIn",
   "TempPcb"
 };
+const char *plotTitle[] = {
+  "Temp\nIn",
+  "Temp\nOut",
+  "Pres",
+  "Hum",
+  "Temp\nPCB"
+};
 int plotVarsIdx = 0;
 
 
@@ -183,17 +198,24 @@ int plotVarsIdx = 0;
 DHT22 dht22(PIN_DHT);
 float dht_temperature;
 float dht_humidity_rel;
+bool dht_temperature_ok = false;
+bool dht_humidity_rel_ok = false;
 
 // BMP180 PRESSURE (AND TEMP) SENSOR (DEFAULT I2C PINS A4, A5)
 Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
 float bmp_temperature;
 float bmp_pressure;
+bool bmp_temperature_ok = false;
+bool bmp_pressure_ok = false;
 
 // DS18B20 1wire temp sensor
-DS18B20 ds(PIN_DS18B20);
-uint8_t ds_address[] = { 40, 250, 31, 218, 4, 0, 0, 52 };
-uint8_t ds_selected;
+//DS18B20 ds(PIN_ONEWIRE);
+//uint8_t ds_address[] = { 40, 250, 31, 218, 4, 0, 0, 52 };
+//uint8_t ds_selected;
+OneWire oneWire(PIN_ONEWIRE);
+DallasTemperature ds(&oneWire);
 float ds_temperature;
+bool ds_temperature_ok = false;
 
 // STEPPER MOTOR DEFINES
 // standard X25.168 range 315 degrees at 1/3 degree steps
@@ -242,6 +264,7 @@ void setup() {
   encPosPrev = encoder_position;
   encPushdPrev = true;
   lastInputMillis = millis();
+  messageActive = false;
 }
 
 void loop() {
@@ -265,75 +288,93 @@ void loop() {
 
   if (displayOn) {
 
-    switch (displayState) {
+    if (!messageActive) {
+      switch (displayState) {
 
-      case DisplayState::MENU:
-        if (displayStatePrev != displayState) {
-          menuSelIdx = 0;
-          displayStatePrev = displayState;
-        }
-        displayMenu(menuContents[menusIdx], menusLengths[menusIdx], menuSelIdx);
-        if (encPos > encPosPrev && menuSelIdx < menusLengths[menusIdx] - 1) {
-          menuSelIdx++;
-        } else if (encPos < encPosPrev && menuSelIdx > 0) {
-          menuSelIdx--;
-        } else if (encPushd && !encPushdPrev) {
-          switch (menusIdx) {
-            case 0:  // Main
-              switch (menuSelIdx) {
-                case 0:  // Plot
-                  menusIdx = 1;
-                  break;
-                case 1:  // Sensors
-                  setDisplayState(DisplayState::SENSORS);
-                  break;
-              }
-              break;
-            case 1:  // Plot
-              plotVarsIdx = menuSelIdx;
-              setDisplayState(DisplayState::PLOT);
-              menusIdx = 0;
-              break;
+        case DisplayState::MENU:
+          if (displayStatePrev != displayState) {
+            menuSelIdx = 0;
+            displayStatePrev = displayState;
           }
-          menuSelIdx = 0;
-        }
-        break;
-
-      case DisplayState::SENSORS:
-        printSensorReadings();
-        if (encPushd && !encPushdPrev) {
-          setDisplayState(DisplayState::MENU);
-        }
-        break;
-
-      case DisplayState::PLOT:
-        if (encPosPrev != encPos) {
-          if (encPosPrev < encPos) {
-            incPlotTime();
-          } else {
-            decPlotTime();
+          displayMenu(menuContents[menusIdx], menusLengths[menusIdx], menuSelIdx);
+          if (encPos > encPosPrev && menuSelIdx < menusLengths[menusIdx] - 1) {
+            menuSelIdx++;
+          } else if (encPos < encPosPrev && menuSelIdx > 0) {
+            menuSelIdx--;
+          } else if (encPushd && !encPushdPrev) {
+            switch (menusIdx) {
+              case 0:  // Main
+                switch (menuSelIdx) {
+                  case 0:  // Plot
+                    menusIdx = 1;
+                    break;
+                  case 1:  // Sensors
+                    setDisplayState(DisplayState::SENSORS);
+                    break;
+                  case 2:  // Settings
+                    menusIdx = 2;
+                }
+                break;
+              case 1:  // Plot
+                plotVarsIdx = menuSelIdx;
+                setDisplayState(DisplayState::PLOT);
+                menusIdx = 0;
+                break;
+              case 2:  // Settings
+                switch (menuSelIdx) {
+                  case 0:  // Clear log
+                    removeDataLogFile();
+                    initDataLogFile();
+                    menusIdx = 0;
+                    break;
+                  case 1:  // Return
+                    menusIdx = 0;
+                    break;
+                }
+            }
+            menuSelIdx = 0;
           }
-        }
-        if (messageSignActive && millis() - lastMessageSignMillis > MESSAGE_SIGN_SEC * 1000) {
-          messageSignActive = false;
-          updatePlot = true;
-        }
-        if (newLogData && !messageSignActive) {
-          updatePlot = true;
-          newLogData = false;
-        }
-        if (updatePlot) {
-          plotData(plotVars[plotVarsIdx], plotHours[plotHoursIdx], dateStamp, timeStamp);
-          updatePlot = false;
-        }
-        if (displayStatePrev != displayState) {
-          displayMessageSignHours(plotHours[plotHoursIdx]);
-          displayStatePrev = displayState;
-        }
-        if (encPushd && !encPushdPrev) {
-          setDisplayState(DisplayState::MENU);
-        }
-        break;
+          break;
+
+        case DisplayState::SENSORS:
+          printSensorReadings();
+          if (encPushd && !encPushdPrev) {
+            setDisplayState(DisplayState::MENU);
+          }
+          break;
+
+        case DisplayState::PLOT:
+          if (encPosPrev != encPos) {
+            if (encPosPrev < encPos) {
+              incPlotTime();
+            } else {
+              decPlotTime();
+            }
+            updatePlot = true;
+          }
+          if (messageSignActive && millis() - lastMessageSignMillis > MESSAGE_SIGN_SEC * 1000) {
+            messageSignActive = false;
+            updatePlot = true;
+          }
+          if (newLogData && !messageSignActive) {
+            updatePlot = true;
+            newLogData = false;
+          }
+          if (updatePlot) {
+            plotData(plotVars[plotVarsIdx], plotHours[plotHoursIdx], dateStamp, timeStamp, plotTitle[plotVarsIdx]);
+            updatePlot = false;
+          }
+          if (displayStatePrev != displayState) {
+            //displayMessageSignHours(plotHours[plotHoursIdx]);
+            displayStatePrev = displayState;
+          }
+          if (encPushd && !encPushdPrev) {
+            setDisplayState(DisplayState::MENU);
+          }
+          break;
+      }
+    } else if (encPushd) {
+      messageActive = false;
     }
   }
 
@@ -443,6 +484,9 @@ void initBmp() {
     /* There was a problem detecting the BMP085 ... check your connections */
     displayMessage("No BMP085 detected, check I2C");
     // while(1);
+  } else {
+    bmp_temperature_ok = true;
+    bmp_pressure_ok = true;
   }
 }
 
@@ -455,7 +499,10 @@ void initSerial() {
 void initDs() {
   // DS18B20 INIT
   displayMessage("Initializing DS18B20");
-  ds_selected = ds.select(ds_address);
+  //ds_selected = ds.select(ds_address);
+  ds.begin();
+  ds.setWaitForConversion(true);
+  ds.requestTemperatures();
 }
 
 void initSteppers() {
@@ -517,31 +564,31 @@ void isrEncoderPush() {
 // OTHER FUNCTIONS
 
 void arbitrateSensorReadings() {
-  if (dht_temperature > TEMP_PLAUS_MIN && dht_temperature < TEMP_PLAUS_MAX) {
+  if (dht_temperature > TEMP_PLAUS_MIN && dht_temperature < TEMP_PLAUS_MAX && dht_temperature_ok) {
     temperature_in = dht_temperature;
     temperature_in_ok = true;
   } else {
     temperature_in_ok = false;
   }
-  if (ds_temperature > TEMP_PLAUS_MIN && ds_temperature < TEMP_PLAUS_MAX) {
+  if (ds_temperature > TEMP_PLAUS_MIN && ds_temperature < TEMP_PLAUS_MAX && ds_temperature_ok) {
     temperature_out = ds_temperature;
     temperature_out_ok = true;
   } else {
     temperature_out_ok = false;
   }
-  if (bmp_temperature > TEMP_PLAUS_MIN && bmp_temperature < TEMP_PLAUS_MAX) {
+  if (bmp_temperature > TEMP_PLAUS_MIN && bmp_temperature < TEMP_PLAUS_MAX && bmp_temperature_ok) {
     temperature_pcb = bmp_temperature;
     temperature_pcb_ok = true;
   } else {
     temperature_pcb_ok = false;
   }
-  if (bmp_pressure > PRES_PLAUS_MIN && bmp_pressure < PRES_PLAUS_MAX) {
+  if (bmp_pressure > PRES_PLAUS_MIN && bmp_pressure < PRES_PLAUS_MAX && bmp_pressure_ok) {
     pressure = bmp_pressure;
     pressure_ok = true;
   } else {
     pressure_ok = false;
   }
-  if (dht_humidity_rel > HUM_PLAUS_MIN && dht_humidity_rel < HUM_PLAUS_MAX) {
+  if (dht_humidity_rel > HUM_PLAUS_MIN && dht_humidity_rel < HUM_PLAUS_MAX && dht_humidity_rel_ok) {
     humidity_rel = dht_humidity_rel;
     humidity_rel_ok = true;
   } else {
@@ -651,13 +698,28 @@ void readBmp() {
 }
 
 void readDs() {
-  ds_temperature = ds.getTempC();
+  //ds_temperature = ds.getTempC();
+  ds.requestTemperatures();
+  ds_temperature = ds.getTempCByIndex(0);
+  if (ds_temperature == DEVICE_DISCONNECTED_C) {
+    displayMessage("DS18B20 disconnected");
+    ds_temperature_ok = false;
+  } else {
+    ds_temperature_ok = true;
+  }
 }
 
 void readDht() {
   dht_temperature = dht22.getTemperature();
-  // delay(50);  // For stable readings
+  delay(50);  // For stable readings
   dht_humidity_rel = dht22.getHumidity();
+  if (dht22.getLastError() != dht22.OK) {
+    dht_temperature_ok = false;
+    dht_humidity_rel_ok = false;
+  } else {
+    dht_temperature_ok = true;
+    dht_humidity_rel_ok = true;
+  }
 }
 
 void readSensors() {
