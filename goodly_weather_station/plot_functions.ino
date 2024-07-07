@@ -1,3 +1,37 @@
+void plotAxes(float hours, const char *title) {
+  display.clearDisplay();
+
+  // Print plot name
+  display.setCursor(0, 10 * 2);
+  display.print(title);
+
+  // Print plot time
+  display.setCursor(0, 10 * 4);
+  float minutes = hours * 60;
+  float days = hours / 24;
+  float years = days / 365;
+  if (hours < 1) {
+    display.print(String(minutes, 0) + "m");
+  } else if (days > 0.99 && years < 1) {
+    display.print(String(days, 0) + "d");
+  } else if (years > 0.99) {
+    display.print(String(years, 0) + "y");
+  } else {
+    display.print(String(hours, 0) + "h");
+  }
+
+  // Draw axis lines
+  display.drawLine(yLabelWidth + 2, SCREEN_MARGIN_TOP, yLabelWidth + 2, SCREEN_HEIGHT - 1, SSD1306_WHITE);   // Y-axis
+  display.drawLine(yLabelWidth + 2, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE);  // X-axis
+
+  // Print wait text
+  display.setCursor(SCREEN_WIDTH / 2 - 12 * charWidth / 2 + 2 * charWidth, SCREEN_HEIGHT / 2);
+  display.print("Loading data");
+
+  // Update display
+  display.display();
+}
+
 void plotData(const char *var, float hours, String &currentDate, String &currentTime, const char *title) {
 
   File file = SD.open(DATA_LOG_FILE, FILE_READ);
@@ -8,10 +42,6 @@ void plotData(const char *var, float hours, String &currentDate, String &current
     return;
   }
 
-  const int charWidth = 6;
-  const int charHeight = 7;
-  // y-axis label (characters plus margin)
-  const int yLabelWidth = charWidth * 4 + 1;
   // Plot area is width - label - line
   const int maxDataPoints = SCREEN_WIDTH - yLabelWidth - 1;
   float data[maxDataPoints];
@@ -164,41 +194,30 @@ void plotData(const char *var, float hours, String &currentDate, String &current
   }
 
   // Plot the data
-  display.clearDisplay();
+  //display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
 
   // Print min and max values to the left of the y-axis
   display.setCursor(0, SCREEN_MARGIN_TOP);
-  display.print((int)maxData);  // Print max value at the top
-  display.setCursor(0, SCREEN_HEIGHT - charHeight);
-  display.print((int)minData);  // Print min value at the bottom
-
-  // Print plot name
-  display.setCursor(0, 10*2);
-  display.print(title);
-
-  // Print plot time
-  display.setCursor(0, 10*4);
-  float minutes = hours * 60;
-  float days = hours / 24;
-  float years = days / 365;
-  if (hours < 1) {
-    display.print(String(minutes, 0) + "m");
-  } else if (days > 0.99 &&  years < 1) {
-    display.print(String(days, 0) + "d");
-  } else if (years > 0.99) {
-    display.print(String(years, 0) + "y");
+  if (maxData > 100) {
+    display.print(maxData, 0);
   } else {
-    display.print(String(hours, 0) + "h");
+    display.print(maxData, 1);
+  }
+  display.setCursor(0, SCREEN_HEIGHT - charHeight);
+  if (minData > 100) {
+    display.print(minData, 0);
+  } else {
+    display.print(minData, 1);
   }
 
-  // Draw axis lines
-  display.drawLine(yLabelWidth + 2, SCREEN_MARGIN_TOP, yLabelWidth + 2, SCREEN_HEIGHT - 1, SSD1306_WHITE);   // Y-axis
-  display.drawLine(yLabelWidth + 2, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE);  // X-axis
+  // Clear plot area
+  display.fillRect(yLabelWidth + 3, 0, maxDataPoints, SCREEN_HEIGHT - 2, SSD1306_BLACK);
 
   // Plot data
   for (int i = 0; i < maxDataPoints; i++) {
     if (dataCount[i] > 0) {
-      int x = yLabelWidth + 2 + i;
+      int x = yLabelWidth + 3 + i;
       if (plotUseRange) {
         int y1 = map_float(dataMin[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);
         int y2 = map_float(dataMax[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);

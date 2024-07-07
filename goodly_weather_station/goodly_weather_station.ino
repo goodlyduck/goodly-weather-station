@@ -50,10 +50,10 @@ enum class DialState {
   OFF
 };
 
-DialState dialStateTop = DialState::OFF;
-DialState dialStateBottom = DialState::OFF;
 //DialState dialStateTop = DialState::TEMPERATURE_OUT;
 //DialState dialStateBottom = DialState::TEMPERATURE_IN;
+DialState dialStateTop = DialState::OFF;
+DialState dialStateBottom = DialState::OFF;
 
 // DIAL LIMITS
 #define DIAL_TEMPERATURE_MAX 35
@@ -91,7 +91,8 @@ DialState dialStateBottom = DialState::OFF;
 #define DISPLAY_OFF_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
-#define SENSOR_READ_INTERV_SEC 30
+#define SENSOR_READ_INTERV_SEC 10
+#define LOG_INTERV_SEC 60 * 10
 #define SENSOR_READ_INPUT_DLY_SEC 5
 //#define SENSOR_READ_INPUT_DLY_SEC 5
 #define SENSOR_VALUE_ERROR = -999
@@ -99,7 +100,9 @@ DialState dialStateBottom = DialState::OFF;
 #define DATA_LOG_FILE "/datalog.txt"
 #define DATA_LOG_HEADER "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
 #define DIAL_POS_FILE "/dialpos.txt"
+
 #define WIFI_FILE "/wifi.txt"
+#define WIFI_RETRY_SEC 10
 
 #define TEMP_PLAUS_MIN -60
 #define TEMP_PLAUS_MAX 60
@@ -107,6 +110,8 @@ DialState dialStateBottom = DialState::OFF;
 #define PRES_PLAUS_MAX 1200
 #define HUM_PLAUS_MIN 0
 #define HUM_PLAUS_MAX 100
+
+#define NTP_TIMEOUT_SEC 5
 
 // ROTARY ENCODER PUSH BUTTON
 // detachInterrupt(GPIOPin);
@@ -126,6 +131,10 @@ unsigned long lastEncoderInputMillis = millis();
 // USER CONSTANTS
 const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 0;
+const int charWidth = 6;
+const int charHeight = 7;
+// y-axis label (characters plus margin)
+const int yLabelWidth = charWidth * 4 + 1;
 
 
 // USER VARIABLES
@@ -138,6 +147,7 @@ bool messageSignActive = false;
 bool messageSignActivePrev = false;
 bool plotUseRange = true;
 unsigned long lastSensorReadMillis = 0;
+unsigned long lastLogMillis = 0;
 float temperature_in;
 float temperature_out;
 float temperature_pcb;
@@ -152,17 +162,20 @@ unsigned int currentMessageLine = 0;
 String messages[DISPLAY_LINES];
 unsigned int storedDialPosTop;
 unsigned int storedDialPosBottom;
-float plotHours[] = { 1.0 / 60, 1.0 / 6, 1, 12, 24, 24 * 7, 24 * 30, 24 * 365, 24 * 365 * 2, 24 * 365 * 5, 24 * 365 * 10, 24 * 365 * 20, 24 * 365 * 50, 24 * 365 * 100 };
-unsigned int plotHoursIdx = 2;
+float plotHours[] = { 1.0 / 6, 1, 12, 24, 24 * 7, 24 * 30, 24 * 365, 24 * 365 * 2, 24 * 365 * 5, 24 * 365 * 10, 24 * 365 * 20, 24 * 365 * 50, 24 * 365 * 100 };
+unsigned int plotHoursIdx = 3;
 bool newLogData;
 bool updatePlot;
+bool updateAxes;
 bool newSensorReadings = false;
+
+bool timeOk = false;
 
 // Menu
 unsigned int menuSelIdx = 0;
 const char *menus[] = { "Main", "Plot", "Settings" };
 unsigned int menusIdx = 0;
-const unsigned int menusLengths[] = { 4, 5, 2 };
+const unsigned int menusLengths[] = { 4, 5, 5 };
 const char *menuContents[][5] = {
   { "Plot",
     "Sensors",
@@ -174,7 +187,10 @@ const char *menuContents[][5] = {
     "Humidity",
     "PCB temperature" },
   { "Clear log",
-    "Return" }
+    "Return",
+    "Top dial setting",
+    "Bottom dial setting",
+    "Logging" }
 };
 
 const char *plotVars[] = {
@@ -224,7 +240,7 @@ bool ds_temperature_ok = false;
 // #define DIAL_RANGE_DEG 216 // Limited to front markings
 #define DIAL_RANGE_DEG 252  // Limited to front markings plus one more
 #define DIAL_RANGE_STEPS (DIAL_RANGE_DEG * 3)
-#define DIAL_CAL_STEPS 20
+#define DIAL_CAL_STEPS 5
 // SwitecX25 motor1(STEPS,9,7,5,3);
 SwitecX25 *motor1;
 SwitecX25 *motor2;
@@ -317,6 +333,7 @@ void loop() {
                 break;
               case 1:  // Plot
                 plotVarsIdx = menuSelIdx;
+                plotHoursIdx = 3;
                 setDisplayState(DisplayState::PLOT);
                 menusIdx = 0;
                 break;
@@ -344,21 +361,32 @@ void loop() {
           break;
 
         case DisplayState::PLOT:
+          if (displayStatePrev != displayState || (displayOn && !displayOnPrev)) {
+            updateAxes = true;
+            updatePlot = true;
+            displayStatePrev = displayState;
+          }
           if (encPosPrev != encPos) {
             if (encPosPrev < encPos) {
               incPlotTime();
             } else {
               decPlotTime();
             }
+            updateAxes = true;
             updatePlot = true;
           }
           if (messageSignActive && millis() - lastMessageSignMillis > MESSAGE_SIGN_SEC * 1000) {
             messageSignActive = false;
+            updateAxes = true;
             updatePlot = true;
           }
           if (newLogData && !messageSignActive) {
             updatePlot = true;
             newLogData = false;
+          }
+          if (updateAxes) {
+            plotAxes(plotHours[plotHoursIdx], plotTitle[plotVarsIdx]);
+            updateAxes = false;
           }
           if (updatePlot) {
             plotData(plotVars[plotVarsIdx], plotHours[plotHoursIdx], dateStamp, timeStamp, plotTitle[plotVarsIdx]);
@@ -370,20 +398,23 @@ void loop() {
           }
           if (encPushd && !encPushdPrev) {
             setDisplayState(DisplayState::MENU);
+            menusIdx = 0;
           }
           break;
       }
     } else if (encPushd) {
       messageActive = false;
     }
+    displayOnPrev = displayOn;
   }
 
   if ((millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000) && (millis() - lastInputMillis > SENSOR_READ_INPUT_DLY_SEC * 1000)) {
     readSensors();
     arbitrateSensorReadings();
     getTimeStamp();
-    if (timeClient.isTimeSet()) {
+    if (timeOk && millis() - lastLogMillis > LOG_INTERV_SEC * 1000) {
       logData();
+      lastLogMillis = millis();
       //catFileSerial(DATA_LOG_FILE);
     }
     updateDialPos(motor1, dialStateTop);
@@ -537,6 +568,84 @@ void initSteppers() {
 
   displayMessage("Plz center bottom dial");
   zeroStepper(motor2);
+}
+
+void initWifi() {
+  String password;
+  String ssid;
+  displayMessage("Initializing WiFi");
+  File file = SD.open(WIFI_FILE);
+  if (file) {
+    if (file.available()) {
+      ssid = file.readStringUntil('\n');
+      ssid.trim();
+      // ssid = line.c_str();
+      displayMessage("WiFi: " + ssid);
+    }
+    if (file.available()) {
+      password = file.readStringUntil('\n');
+      password.trim();
+      // password = line.c_str();
+      //displayMessage(password);
+    }
+  } else {
+    displayMessage("Could not open " + String(WIFI_FILE));
+    return;
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  // Will try for about 10 seconds (20x 500ms)
+  int tryDelay = 500;
+  int numberOfTries = 20;
+
+  // Wait for the WiFi event
+  while (true) {
+    switch (WiFi.status()) {
+      case WL_NO_SSID_AVAIL:
+        Serial.println("[WiFi] SSID not found");
+        break;
+      case WL_CONNECT_FAILED:
+        Serial.print("[WiFi] Failed - WiFi not connected! Reason: ");
+        return;
+        break;
+      case WL_CONNECTION_LOST:
+        Serial.println("[WiFi] Connection was lost");
+        break;
+      case WL_SCAN_COMPLETED:
+        Serial.println("[WiFi] Scan is completed");
+        break;
+      case WL_DISCONNECTED:
+        Serial.println("[WiFi] WiFi is disconnected");
+        break;
+      case WL_CONNECTED:
+        Serial.println("[WiFi] WiFi is connected!");
+        Serial.print("[WiFi] IP address: ");
+        Serial.println(WiFi.localIP());
+        return;
+        break;
+      default:
+        Serial.print("[WiFi] WiFi Status: ");
+        Serial.println(WiFi.status());
+        break;
+    }
+    delay(tryDelay);
+
+    if (numberOfTries <= 0) {
+      Serial.println("[WiFi] Failed to connect to WiFi!");
+      // Use disconnect function to force stop trying to connect
+      WiFi.disconnect();
+      return;
+    } else {
+      numberOfTries--;
+    }
+  }
+}
+
+void initTime() {
+  displayMessage("Initializing NTP time");
+  timeClient.begin();
+  getTimeStamp();
+  displayMessage(dateStamp + " " + timeStamp);
 }
 
 // INTERRUPT FUNCTIONS
@@ -763,77 +872,6 @@ void printSensorReadings() {
   display.display();
 }
 
-void initWifi() {
-  String password;
-  String ssid;
-  displayMessage("Initializing WiFi");
-  File file = SD.open(WIFI_FILE);
-  if (file) {
-    if (file.available()) {
-      ssid = file.readStringUntil('\n');
-      ssid.trim();
-      // ssid = line.c_str();
-      displayMessage("WiFi: " + ssid);
-    }
-    if (file.available()) {
-      password = file.readStringUntil('\n');
-      password.trim();
-      // password = line.c_str();
-      //displayMessage(password);
-    }
-  } else {
-    displayMessage("Could not open " + String(WIFI_FILE));
-    return;
-  }
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  // Will try for about 10 seconds (20x 500ms)
-  int tryDelay = 500;
-  int numberOfTries = 20;
-
-  // Wait for the WiFi event
-  while (true) {
-    switch (WiFi.status()) {
-      case WL_NO_SSID_AVAIL:
-        Serial.println("[WiFi] SSID not found");
-        break;
-      case WL_CONNECT_FAILED:
-        Serial.print("[WiFi] Failed - WiFi not connected! Reason: ");
-        return;
-        break;
-      case WL_CONNECTION_LOST:
-        Serial.println("[WiFi] Connection was lost");
-        break;
-      case WL_SCAN_COMPLETED:
-        Serial.println("[WiFi] Scan is completed");
-        break;
-      case WL_DISCONNECTED:
-        Serial.println("[WiFi] WiFi is disconnected");
-        break;
-      case WL_CONNECTED:
-        Serial.println("[WiFi] WiFi is connected!");
-        Serial.print("[WiFi] IP address: ");
-        Serial.println(WiFi.localIP());
-        return;
-        break;
-      default:
-        Serial.print("[WiFi] WiFi Status: ");
-        Serial.println(WiFi.status());
-        break;
-    }
-    delay(tryDelay);
-
-    if (numberOfTries <= 0) {
-      Serial.println("[WiFi] Failed to connect to WiFi!");
-      // Use disconnect function to force stop trying to connect
-      WiFi.disconnect();
-      return;
-    } else {
-      numberOfTries--;
-    }
-  }
-}
-
 void listFiles(File dir, int numTabs) {
   while (true) {
     File entry = dir.openNextFile();
@@ -873,30 +911,40 @@ void catFileSerial(const char *path) {
   }
 }
 
-void initTime() {
-  displayMessage("Initializing NTP time");
-  timeClient.begin();
-  getTimeStamp();
-  displayMessage(dateStamp + " " + timeStamp);
-}
-
-
 // Function to get date and time from NTPClient
 void getTimeStamp() {
-  while (!timeClient.update()) {
-    timeClient.forceUpdate();
-  }
-  // The formattedDate comes with the following format:
-  // 2018-05-28T16:00:13Z
-  // We need to extract date and time
-  formattedDate = timeClient.getFormattedDate();
-  // Serial.println(formattedDate);
+  if (WiFi.status() == WL_CONNECTED) {
+    unsigned long startTime = millis();
+    bool timeout = false;
+    while (!timeClient.update()) {
+      if (millis() - startTime > NTP_TIMEOUT_SEC * 1000) {
+        timeout = true;
+        break;
+      }
+      timeClient.forceUpdate();
+    }
+    if (timeout) {
+      displayMessage("NTP update failed");
+      timeOk = false;
+    } else if (timeClient.isTimeSet()) {
+      timeOk = true;
+    }
 
-  // Extract date
-  int splitT = formattedDate.indexOf("T");
-  dateStamp = formattedDate.substring(0, splitT);
-  // Extract time
-  timeStamp = formattedDate.substring(splitT + 1, formattedDate.length() - 1);
+    // The formattedDate comes with the following format:
+    // 2018-05-28T16:00:13Z
+    // We need to extract date and time
+    formattedDate = timeClient.getFormattedDate();
+    // Serial.println(formattedDate);
+
+    // Extract date
+    int splitT = formattedDate.indexOf("T");
+    dateStamp = formattedDate.substring(0, splitT);
+    // Extract time
+    timeStamp = formattedDate.substring(splitT + 1, formattedDate.length() - 1);
+  } else {
+    timeOk = false;
+    displayMessage("No WiFi, no timestamp");
+  }
 }
 
 void logData() {
@@ -922,7 +970,6 @@ void logData() {
     displayMessage("Error writing " + String(DATA_LOG_FILE));
   }
 }
-
 
 void storeMotorPos() {
   File file = SD.open(DIAL_POS_FILE, FILE_WRITE);
