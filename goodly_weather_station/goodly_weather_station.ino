@@ -95,8 +95,9 @@ DialState dialStateBottom = DialState::OFF;
 #define LOG_INTERV_SEC 60 * 10
 #define SENSOR_READ_INPUT_DLY_SEC 5
 //#define SENSOR_READ_INPUT_DLY_SEC 5
-#define SENSOR_VALUE_ERROR = -999
+//#define SENSOR_VALUE_ERROR -999
 #define ENCODER_DEBOUNCE_MILLIS 100
+#define PUSH_DEBOUNCE_MILLIS 100
 #define DATA_LOG_FILE "/datalog.txt"
 #define DATA_LOG_HEADER "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
 #define DIAL_POS_FILE "/dialpos.txt"
@@ -126,7 +127,8 @@ int encPos = 0;
 int encPosPrev = 0;
 bool encPushd = false;
 bool encPushdPrev = false;
-unsigned long lastEncoderInputMillis = millis();
+unsigned long lastEncoderInputMillis = 0;
+unsigned long lastPushInputMillis = 0;
 
 // USER CONSTANTS
 const char *ntpServer = "pool.ntp.org";
@@ -138,7 +140,7 @@ const int yLabelWidth = charWidth * 4 + 1;
 
 
 // USER VARIABLES
-volatile unsigned long lastInputMillis = millis();
+unsigned long lastInputMillis = millis();
 unsigned long lastMessageMillis = 0;
 bool messageActive = false;
 bool messageActivePrev = false;
@@ -170,7 +172,6 @@ bool updateAxes;
 bool newSensorReadings = false;
 bool logging = false;
 bool zeroDialsAtStartup = false;
-
 bool timeOk = false;
 
 // Menu
@@ -179,7 +180,7 @@ const char *menus[] = { "Main", "Plot", "Settings" };
 enum class MenuState { MAIN,
                        PLOT,
                        SETTINGS };
-unsigned int menuIdx = 0;
+MenuState menuState = MenuState::MAIN;
 const unsigned int menusLengths[] = { 4, 5, 5 };
 const char *menuContents[][5] = {
   { "Plot",
@@ -276,9 +277,6 @@ void setup() {
   readSensors();
   arbitrateSensorReadings();
   getTimeStamp();
-  if (timeClient.isTimeSet()) {
-    logData();
-  }
   updateDialPos(motor1, dialStateTop);
   updateDialPos(motor2, dialStateBottom);
 
@@ -294,6 +292,7 @@ void loop() {
 
   if (encPos != encPosPrev || (encPushd && !encPushdPrev)) {
     lastInputMillis = millis();
+    Serial.println("Input");
   }
 
   if (millis() - lastInputMillis < DISPLAY_OFF_SEC * 1000) {
@@ -317,42 +316,41 @@ void loop() {
             menuSelIdx = 0;
             displayStatePrev = displayState;
           }
-          displayMenu(menuContents[menuIdx], menusLengths[menuIdx], menuSelIdx);
-          if (encPos > encPosPrev && menuSelIdx < menusLengths[menuIdx] - 1) {
+          displayMenu(menuContents[(unsigned int)menuState], menusLengths[(unsigned int)menuState], menuSelIdx);
+          if (encPos > encPosPrev && menuSelIdx < menusLengths[(unsigned int)menuState] - 1) {
             menuSelIdx++;
           } else if (encPos < encPosPrev && menuSelIdx > 0) {
             menuSelIdx--;
           } else if (encPushd && !encPushdPrev) {
-            switch ((MenuState)menuIdx) {
-              case MenuState::MAIN:  // Main
-                switch (menuSelIdx) {
-                  case 0:  // Plot
-                    menuIdx = (unsigned int)MenuState::PLOT;
-                    break;
-                  case 1:  // Sensors
-                    setDisplayState(DisplayState::SENSORS);
-                    break;
-                  case 2:  // Settings
-                    menuIdx = 2;
+            Serial.println("Pushed in main menu");
+            switch (menuState) {
+              case MenuState::MAIN:
+                if (isMenuSelection("Plot")) {
+                  menuState = MenuState::PLOT;
+                } else if (isMenuSelection("Sensors")) {
+                  setDisplayState(DisplayState::SENSORS);
+                } else if (isMenuSelection("Settings")) {
+                  menuState = MenuState::SETTINGS;
                 }
                 break;
-              case MenuState::PLOT:  // Plot
+              case MenuState::PLOT:
                 plotVarsIdx = menuSelIdx;
                 plotHoursIdx = 3;
                 setDisplayState(DisplayState::PLOT);
-                menuIdx = 0;
+                menuState = MenuState::MAIN;
                 break;
-              case MenuState::SETTINGS:  // Settings
+              case MenuState::SETTINGS:
                 switch (menuSelIdx) {
                   case 0:  // Clear log
                     removeDataLogFile();
                     initDataLogFile();
-                    menuIdx = 0;
+                    menuState = MenuState::MAIN;
                     break;
                   case 1:  // Return
-                    menuIdx = 0;
+                    menuState = MenuState::MAIN;
                     break;
                 }
+                break;
             }
             menuSelIdx = 0;
           }
@@ -403,11 +401,11 @@ void loop() {
           }
           if (encPushd && !encPushdPrev) {
             setDisplayState(DisplayState::MENU);
-            menuIdx = 0;
+            menuState = MenuState::MAIN;
           }
           break;
       }
-    } else if (encPushd) {
+    } else if (encPushd && !encPushdPrev) {
       messageActive = false;
     }
     displayOnPrev = displayOn;
@@ -684,6 +682,14 @@ void isrEncoderPush() {
 
 // OTHER FUNCTIONS
 
+bool isMenuSelection(const char *text) {
+  if (strcmp(menuContents[(unsigned int)menuState][menuSelIdx], text) == 0) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
 void arbitrateSensorReadings() {
   if (dht_temperature > TEMP_PLAUS_MIN && dht_temperature < TEMP_PLAUS_MAX && dht_temperature_ok) {
     temperature_in = dht_temperature;
@@ -765,11 +771,23 @@ unsigned int valToDialPos(float val, float min, float max) {
 }
 
 void getEncoder() {
+  
   encPosPrev = encPos;
   encPos = encoder_position;
+
   encPushdPrev = encPushd;
-  encPushd = encoder_push_pressed;
-  encoder_push_pressed = false;
+  if (encoder_push_pressed) {
+    unsigned long current_millis = millis();
+    if (current_millis - lastPushInputMillis > PUSH_DEBOUNCE_MILLIS) {
+      encPushd = true;
+      lastPushInputMillis = current_millis;
+    } else {
+      encPushd = false;
+    }
+    encoder_push_pressed = false;
+  } else {
+    encPushd = false;
+  }
 }
 
 void displayEncoderReadings() {
