@@ -168,13 +168,18 @@ bool newLogData;
 bool updatePlot;
 bool updateAxes;
 bool newSensorReadings = false;
+bool logging = false;
+bool zeroDialsAtStartup = false;
 
 bool timeOk = false;
 
 // Menu
 unsigned int menuSelIdx = 0;
 const char *menus[] = { "Main", "Plot", "Settings" };
-unsigned int menusIdx = 0;
+enum class MenuState { MAIN,
+                       PLOT,
+                       SETTINGS };
+unsigned int menuIdx = 0;
 const unsigned int menusLengths[] = { 4, 5, 5 };
 const char *menuContents[][5] = {
   { "Plot",
@@ -312,40 +317,40 @@ void loop() {
             menuSelIdx = 0;
             displayStatePrev = displayState;
           }
-          displayMenu(menuContents[menusIdx], menusLengths[menusIdx], menuSelIdx);
-          if (encPos > encPosPrev && menuSelIdx < menusLengths[menusIdx] - 1) {
+          displayMenu(menuContents[menuIdx], menusLengths[menuIdx], menuSelIdx);
+          if (encPos > encPosPrev && menuSelIdx < menusLengths[menuIdx] - 1) {
             menuSelIdx++;
           } else if (encPos < encPosPrev && menuSelIdx > 0) {
             menuSelIdx--;
           } else if (encPushd && !encPushdPrev) {
-            switch (menusIdx) {
-              case 0:  // Main
+            switch ((MenuState)menuIdx) {
+              case MenuState::MAIN:  // Main
                 switch (menuSelIdx) {
                   case 0:  // Plot
-                    menusIdx = 1;
+                    menuIdx = (unsigned int)MenuState::PLOT;
                     break;
                   case 1:  // Sensors
                     setDisplayState(DisplayState::SENSORS);
                     break;
                   case 2:  // Settings
-                    menusIdx = 2;
+                    menuIdx = 2;
                 }
                 break;
-              case 1:  // Plot
+              case MenuState::PLOT:  // Plot
                 plotVarsIdx = menuSelIdx;
                 plotHoursIdx = 3;
                 setDisplayState(DisplayState::PLOT);
-                menusIdx = 0;
+                menuIdx = 0;
                 break;
-              case 2:  // Settings
+              case MenuState::SETTINGS:  // Settings
                 switch (menuSelIdx) {
                   case 0:  // Clear log
                     removeDataLogFile();
                     initDataLogFile();
-                    menusIdx = 0;
+                    menuIdx = 0;
                     break;
                   case 1:  // Return
-                    menusIdx = 0;
+                    menuIdx = 0;
                     break;
                 }
             }
@@ -354,7 +359,7 @@ void loop() {
           break;
 
         case DisplayState::SENSORS:
-          printSensorReadings();
+          displaySensorReadings();
           if (encPushd && !encPushdPrev) {
             setDisplayState(DisplayState::MENU);
           }
@@ -398,7 +403,7 @@ void loop() {
           }
           if (encPushd && !encPushdPrev) {
             setDisplayState(DisplayState::MENU);
-            menusIdx = 0;
+            menuIdx = 0;
           }
           break;
       }
@@ -408,11 +413,12 @@ void loop() {
     displayOnPrev = displayOn;
   }
 
-  if ((millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000) && (millis() - lastInputMillis > SENSOR_READ_INPUT_DLY_SEC * 1000)) {
+  if ((millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000)
+      && (millis() - lastInputMillis > SENSOR_READ_INPUT_DLY_SEC * 1000)) {
     readSensors();
     arbitrateSensorReadings();
     getTimeStamp();
-    if (timeOk && millis() - lastLogMillis > LOG_INTERV_SEC * 1000) {
+    if (timeOk && millis() - lastLogMillis > LOG_INTERV_SEC * 1000 && logging) {
       logData();
       lastLogMillis = millis();
       //catFileSerial(DATA_LOG_FILE);
@@ -536,6 +542,22 @@ void initDs() {
   ds.requestTemperatures();
 }
 
+void zeroDials() {
+  motor1->setPosition(DIAL_RANGE_STEPS / 2);
+  motor2->setPosition(DIAL_RANGE_STEPS / 2);
+
+  motor1->updateBlocking();
+  motor2->updateBlocking();
+
+  storeMotorPos();
+
+  displayMessage("Plz center top dial");
+  zeroStepper(motor1);
+
+  displayMessage("Plz center bottom dial");
+  zeroStepper(motor2);
+}
+
 void initSteppers() {
   // STEPPER MOTOR INIT
   // Setting pin mode in SwitecX25 constructor before setup() does not work
@@ -555,19 +577,9 @@ void initSteppers() {
   motor2->setCurrentStep(storedDialPosBottom);
   //displayMessage("Bottom: " + String(storedDialPosBottom));
 
-  motor1->setPosition(DIAL_RANGE_STEPS / 2);
-  motor2->setPosition(DIAL_RANGE_STEPS / 2);
-
-  motor1->updateBlocking();
-  motor2->updateBlocking();
-
-  storeMotorPos();
-
-  displayMessage("Plz center top dial");
-  zeroStepper(motor1);
-
-  displayMessage("Plz center bottom dial");
-  zeroStepper(motor2);
+  if (zeroDialsAtStartup) {
+    zeroDials();
+  }
 }
 
 void initWifi() {
@@ -838,7 +850,7 @@ void readSensors() {
   lastSensorReadMillis = millis();
 }
 
-void printSensorReadings() {
+void displaySensorReadings() {
   display.clearDisplay();
   display.setCursor(0, 0);  // Start at top-left corner
 
@@ -868,6 +880,29 @@ void printSensorReadings() {
 
   display.print("Encoder: ");
   display.print(encPos);
+
+  display.display();
+}
+
+void displaySummary() {
+  display.clearDisplay();
+  display.setCursor(0, charHeight + 1);  // Start at top-left corner
+
+  display.print("Temp in: ");
+  display.print(temperature_in);
+  display.println(" C");
+
+  display.print("Temp out: ");
+  display.print(temperature_out);
+  display.println(" C");
+
+  display.print("Pressure: ");
+  display.print(pressure);
+  display.println(" hPa");
+
+  display.print("Humidity: ");
+  display.print(humidity_rel);
+  display.println(" %");
 
   display.display();
 }
