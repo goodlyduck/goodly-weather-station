@@ -35,14 +35,14 @@ enum class DisplayState {
   INIT,
   SENSORS,
   MENU,
-  PLOT
+  PLOT,
+  SUMMARY
 };
 
 DisplayState displayState = DisplayState::MENU;
 DisplayState displayStatePrev = DisplayState::INIT;
 
 enum class DialState {
-  INIT,
   TEMPERATURE_IN,
   TEMPERATURE_OUT,
   PRESSURE,
@@ -149,7 +149,7 @@ bool messageSignActive = false;
 bool messageSignActivePrev = false;
 bool plotUseRange = true;
 unsigned long lastSensorReadMillis = 0;
-unsigned long lastLogMillis = 0;
+unsigned long lastLogMillis;
 float temperature_in;
 float temperature_out;
 float temperature_pcb;
@@ -173,6 +173,7 @@ bool newSensorReadings = false;
 bool logging = false;
 bool zeroDialsAtStartup = false;
 bool timeOk = false;
+bool clearLogPressed = false;
 
 // Menu
 unsigned int menuSelIdx = 0;
@@ -181,9 +182,10 @@ enum class MenuState { MAIN,
                        PLOT,
                        SETTINGS };
 MenuState menuState = MenuState::MAIN;
-const unsigned int menusLengths[] = { 4, 5, 5 };
+const unsigned int menusLengths[] = { 5, 5, 5 };
 const char *menuContents[][5] = {
   { "Plot",
+    "Summary",
     "Sensors",
     "Settings",
     "Forecast" },
@@ -192,11 +194,11 @@ const char *menuContents[][5] = {
     "Pressure",
     "Humidity",
     "PCB temperature" },
-  { "Clear log",
-    "Return",
-    "Top dial setting",
-    "Bottom dial setting",
-    "Logging" }
+  { "Top dial",
+    "Bottom dial",
+    "Logging",
+    "Clear log",
+    "Return" }
 };
 
 const char *plotVars[] = {
@@ -255,7 +257,7 @@ SwitecX25 *motor2;
 #define SCREEN_WIDTH 128  // OLED display width, in pixels
 #define SCREEN_HEIGHT 64  // OLED display height, in pixels
 #define SCREEN_MARGIN_TOP 5
-#define SCREEN_MARGIN_LEFT 5
+#define SCREEN_MARGIN_LEFT 1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
                          &SPI, PIN_SPI_DC, PIN_OLED_RESET, PIN_SPI_CS_OLED);
 bool displayOn = true;
@@ -283,6 +285,7 @@ void setup() {
   encPosPrev = encoder_position;
   encPushdPrev = true;
   lastInputMillis = millis();
+  lastLogMillis = millis();  //Delay first log (sensor startup?)
   messageActive = false;
 }
 
@@ -299,6 +302,8 @@ void loop() {
     setDisplayOn();
   } else {
     setDisplayOff();
+    displayState = DisplayState::SUMMARY;
+    clearLogPressed = false;
   }
 
   if (displayOn && !displayOnPrev) {
@@ -315,14 +320,16 @@ void loop() {
           if (displayStatePrev != displayState) {
             menuSelIdx = 0;
             displayStatePrev = displayState;
+            clearLogPressed = false;
           }
+
           displayMenu(menuContents[(unsigned int)menuState], menusLengths[(unsigned int)menuState], menuSelIdx);
+
           if (encPos > encPosPrev && menuSelIdx < menusLengths[(unsigned int)menuState] - 1) {
             menuSelIdx++;
           } else if (encPos < encPosPrev && menuSelIdx > 0) {
             menuSelIdx--;
           } else if (encPushd && !encPushdPrev) {
-            Serial.println("Pushed in main menu");
             switch (menuState) {
               case MenuState::MAIN:
                 if (isMenuSelection("Plot")) {
@@ -331,6 +338,9 @@ void loop() {
                   setDisplayState(DisplayState::SENSORS);
                 } else if (isMenuSelection("Settings")) {
                   menuState = MenuState::SETTINGS;
+                  menuSelIdx = 0;
+                } else if (isMenuSelection("Summary")) {
+                  setDisplayState(DisplayState::SUMMARY);
                 }
                 break;
               case MenuState::PLOT:
@@ -338,26 +348,52 @@ void loop() {
                 plotHoursIdx = 3;
                 setDisplayState(DisplayState::PLOT);
                 menuState = MenuState::MAIN;
+                menuSelIdx = 0;
                 break;
               case MenuState::SETTINGS:
-                switch (menuSelIdx) {
-                  case 0:  // Clear log
-                    removeDataLogFile();
-                    initDataLogFile();
+                if (isMenuSelection("Clear log")) {
+                  if (clearLogPressed) {
+                    //removeDataLogFile();
+                    //initDataLogFile();
                     menuState = MenuState::MAIN;
-                    break;
-                  case 1:  // Return
-                    menuState = MenuState::MAIN;
-                    break;
+                    menuSelIdx = 0;
+                    clearLogPressed = false;
+                  } else {
+                    clearLogPressed = true;
+                  }
+                } else if (isMenuSelection("Return")) {
+                  menuState = MenuState::MAIN;
+                  clearLogPressed = false;
+                  menuSelIdx = 0;
+                } else if (isMenuSelection("Logging")) {
+                  logging = !logging;
+                } else if (isMenuSelection("Top dial")) {
+                  if (dialStateTop == DialState::OFF) {
+                    dialStateTop = (DialState)0;
+                  } else {
+                    dialStateTop = (DialState)((int)dialStateTop + 1);
+                  }
+                } else if (isMenuSelection("Bottom dial")) {
+                  if (dialStateBottom == DialState::OFF) {
+                    dialStateBottom = (DialState)0;
+                  } else {
+                    dialStateBottom = (DialState)((int)dialStateBottom + 1);
+                  }
                 }
                 break;
             }
-            menuSelIdx = 0;
           }
           break;
 
         case DisplayState::SENSORS:
           displaySensorReadings();
+          if (encPushd && !encPushdPrev) {
+            setDisplayState(DisplayState::MENU);
+          }
+          break;
+
+        case DisplayState::SUMMARY:
+          displaySummary();
           if (encPushd && !encPushdPrev) {
             setDisplayState(DisplayState::MENU);
           }
@@ -421,9 +457,10 @@ void loop() {
       lastLogMillis = millis();
       //catFileSerial(DATA_LOG_FILE);
     }
-    updateDialPos(motor1, dialStateTop);
-    updateDialPos(motor2, dialStateBottom);
   }
+
+  updateDialPos(motor1, dialStateTop);
+  updateDialPos(motor2, dialStateBottom);
 
   motor1->update();
   motor2->update();
@@ -771,7 +808,7 @@ unsigned int valToDialPos(float val, float min, float max) {
 }
 
 void getEncoder() {
-  
+
   encPosPrev = encPos;
   encPos = encoder_position;
 
@@ -872,6 +909,8 @@ void displaySensorReadings() {
   display.clearDisplay();
   display.setCursor(0, 0);  // Start at top-left corner
 
+  display.print("\n");
+
   display.print("Temp bmp: ");
   display.print(bmp_temperature);
   display.println(" C");
@@ -894,8 +933,6 @@ void displaySensorReadings() {
   display.print(ds_temperature);
   display.println(" C");
 
-  display.print("\n");
-
   display.print("Encoder: ");
   display.print(encPos);
 
@@ -904,7 +941,9 @@ void displaySensorReadings() {
 
 void displaySummary() {
   display.clearDisplay();
-  display.setCursor(0, charHeight + 1);  // Start at top-left corner
+  display.setCursor(0, 0);  // Start at top-left corner
+
+  display.print("\n");
 
   display.print("Temp in: ");
   display.print(temperature_in);
@@ -921,6 +960,16 @@ void displaySummary() {
   display.print("Humidity: ");
   display.print(humidity_rel);
   display.println(" %");
+
+  display.print("\n");
+
+  display.println(dateStamp + " " + timeStamp);
+
+  if (logging) {
+    display.print("Logging: ON");
+  } else {
+    display.print("Logging: OFF");
+  }
 
   display.display();
 }
