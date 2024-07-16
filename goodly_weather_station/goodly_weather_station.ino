@@ -164,8 +164,8 @@ unsigned int currentMessageLine = 0;
 String messages[DISPLAY_LINES];
 unsigned int storedDialPosTop;
 unsigned int storedDialPosBottom;
-float plotHours[] = { 1.0 / 6, 1, 12, 24, 24 * 7, 24 * 30, 24 * 365, 24 * 365 * 2, 24 * 365 * 5, 24 * 365 * 10, 24 * 365 * 20, 24 * 365 * 50, 24 * 365 * 100 };
-unsigned int plotHoursIdx = 3;
+float plotHours[] = { 1.0, 12, 24, 24 * 7, 24 * 30, 24 * 365, 24 * 365 * 2, 24 * 365 * 5, 24 * 365 * 10, 24 * 365 * 20, 24 * 365 * 50, 24 * 365 * 100 };
+unsigned int plotHoursIdx = 2;
 bool newLogData;
 bool updatePlot;
 bool updateAxes;
@@ -295,7 +295,7 @@ void loop() {
 
   if (encPos != encPosPrev || (encPushd && !encPushdPrev)) {
     lastInputMillis = millis();
-    Serial.println("Input");
+    //Serial.println("Input");
   }
 
   if (millis() - lastInputMillis < DISPLAY_OFF_SEC * 1000) {
@@ -345,7 +345,7 @@ void loop() {
                 break;
               case MenuState::PLOT:
                 plotVarsIdx = menuSelIdx;
-                plotHoursIdx = 3;
+                plotHoursIdx = 2;
                 setDisplayState(DisplayState::PLOT);
                 menuState = MenuState::MAIN;
                 menuSelIdx = 0;
