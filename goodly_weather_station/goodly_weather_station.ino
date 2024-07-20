@@ -152,6 +152,8 @@ unsigned long lastSensorReadMillis = 0;
 unsigned long lastLogMillis;
 float temperature_in;
 float temperature_out;
+float temperature_out_array[] = { INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER };
+unsigned int avgSamplesTempOut = 10;
 float temperature_pcb;
 float pressure;
 float humidity_rel;
@@ -728,30 +730,59 @@ bool isMenuSelection(const char *text) {
 }
 
 void arbitrateSensorReadings() {
+  // Indoor temp
   if (dht_temperature > TEMP_PLAUS_MIN && dht_temperature < TEMP_PLAUS_MAX && dht_temperature_ok) {
     temperature_in = dht_temperature;
     temperature_in_ok = true;
   } else {
     temperature_in_ok = false;
   }
+
+  // Use rolling average for outdoor temperature
+  for (int i = 0; i < avgSamplesTempOut - 1; ++i) {
+    temperature_out_array[i] = temperature_out_array[i + 1];
+  }
   if (ds_temperature > TEMP_PLAUS_MIN && ds_temperature < TEMP_PLAUS_MAX && ds_temperature_ok) {
-    temperature_out = ds_temperature;
+    temperature_out_array[avgSamplesTempOut - 1] = ds_temperature;
+  } else {
+    temperature_out_array[avgSamplesTempOut - 1] = INVALID_NUMBER;
+  }
+  int avgSamples = 0;
+  float sum = 0;
+  for (int i = 0; i < avgSamplesTempOut; ++i) {
+    if (temperature_out_array[i] != INVALID_NUMBER) {
+      sum += temperature_out_array[i];
+      avgSamples++;
+    }
+  }
+  if (avgSamples > 0) {
+    temperature_out = sum / avgSamples;
     temperature_out_ok = true;
   } else {
     temperature_out_ok = false;
   }
+  Serial.println("array:");
+  for (int i = 0; i < avgSamplesTempOut; ++i) {
+    Serial.println(temperature_out_array[i]);
+  }
+
+  // PCB temp
   if (bmp_temperature > TEMP_PLAUS_MIN && bmp_temperature < TEMP_PLAUS_MAX && bmp_temperature_ok) {
     temperature_pcb = bmp_temperature;
     temperature_pcb_ok = true;
   } else {
     temperature_pcb_ok = false;
   }
+
+  // Pressure
   if (bmp_pressure > PRES_PLAUS_MIN && bmp_pressure < PRES_PLAUS_MAX && bmp_pressure_ok) {
     pressure = bmp_pressure;
     pressure_ok = true;
   } else {
     pressure_ok = false;
   }
+
+  // Humidity
   if (dht_humidity_rel > HUM_PLAUS_MIN && dht_humidity_rel < HUM_PLAUS_MAX && dht_humidity_rel_ok) {
     humidity_rel = dht_humidity_rel;
     humidity_rel_ok = true;
