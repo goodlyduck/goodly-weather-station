@@ -1057,7 +1057,7 @@ void getTimeStamp() {
       timeClient.forceUpdate();
     }
     if (timeout) {
-      displayMessage("NTP update failed");
+      //displayMessage("NTP update failed");
       timeOk = false;
     } else if (timeClient.isTimeSet()) {
       timeOk = true;
