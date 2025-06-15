@@ -50,10 +50,10 @@ enum class DialState {
   OFF
 };
 
-//DialState dialStateTop = DialState::TEMPERATURE_OUT;
-//DialState dialStateBottom = DialState::TEMPERATURE_IN;
-DialState dialStateTop = DialState::OFF;
-DialState dialStateBottom = DialState::OFF;
+DialState dialStateTop = DialState::TEMPERATURE_OUT;
+DialState dialStateBottom = DialState::HUMIDITY;
+//DialState dialStateTop = DialState::OFF;
+//DialState dialStateBottom = DialState::OFF;
 
 // DIAL LIMITS
 #define DIAL_TEMPERATURE_MAX 35
@@ -91,7 +91,7 @@ DialState dialStateBottom = DialState::OFF;
 #define DISPLAY_OFF_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
-#define SENSOR_READ_INTERV_SEC 10
+#define SENSOR_READ_INTERV_SEC 60
 #define LOG_INTERV_SEC 60 * 10
 #define SENSOR_READ_INPUT_DLY_SEC 5
 //#define SENSOR_READ_INPUT_DLY_SEC 5
@@ -173,7 +173,7 @@ bool updatePlot;
 bool updateAxes;
 bool newSensorReadings = false;
 bool logging = false;
-bool zeroDialsAtStartup = false;
+bool zeroDialsAtStartup = true;
 bool timeOk = false;
 bool clearLogPressed = false;
 
@@ -184,8 +184,8 @@ enum class MenuState { MAIN,
                        PLOT,
                        SETTINGS };
 MenuState menuState = MenuState::MAIN;
-const unsigned int menusLengths[] = { 5, 5, 5 };
-const char *menuContents[][5] = {
+const unsigned int menusLengths[] = { 5, 6, 5 };
+const char *menuContents[][6] = {
   { "Plot",
     "Summary",
     "Sensors",
@@ -195,7 +195,8 @@ const char *menuContents[][5] = {
     "Outdoor temperature",
     "Pressure",
     "Humidity",
-    "PCB temperature" },
+    "PCB temperature",
+    "Return" },
   { "Top dial",
     "Bottom dial",
     "Logging",
@@ -346,10 +347,15 @@ void loop() {
                 }
                 break;
               case MenuState::PLOT:
-                plotVarsIdx = menuSelIdx;
-                plotHoursIdx = 2;
-                setDisplayState(DisplayState::PLOT);
-                menuState = MenuState::MAIN;
+                if (isMenuSelection("Return")) {
+                  menuState = MenuState::MAIN;
+                }
+                else {
+                  plotVarsIdx = menuSelIdx;
+                  plotHoursIdx = 2;
+                  setDisplayState(DisplayState::PLOT);
+                  menuState = MenuState::MAIN;
+                }
                 menuSelIdx = 0;
                 break;
               case MenuState::SETTINGS:
@@ -580,13 +586,13 @@ void initDs() {
 }
 
 void zeroDials() {
-  motor1->setPosition(DIAL_RANGE_STEPS / 2);
-  motor2->setPosition(DIAL_RANGE_STEPS / 2);
+  //motor1->setPosition(DIAL_RANGE_STEPS / 2);
+  //motor2->setPosition(DIAL_RANGE_STEPS / 2);
 
-  motor1->updateBlocking();
-  motor2->updateBlocking();
+  //motor1->updateBlocking();
+  //motor2->updateBlocking();
 
-  storeMotorPos();
+  //storeMotorPos();
 
   displayMessage("Plz center top dial");
   zeroStepper(motor1);
@@ -761,10 +767,11 @@ void arbitrateSensorReadings() {
   } else {
     temperature_out_ok = false;
   }
-  Serial.println("array:");
-  for (int i = 0; i < avgSamplesTempOut; ++i) {
-    Serial.println(temperature_out_array[i]);
-  }
+  // DEBUG
+  // Serial.println("array:");
+  // for (int i = 0; i < avgSamplesTempOut; ++i) {
+  //   Serial.println(temperature_out_array[i]);
+  // }
 
   // PCB temp
   if (bmp_temperature > TEMP_PLAUS_MIN && bmp_temperature < TEMP_PLAUS_MAX && bmp_temperature_ok) {
@@ -831,7 +838,7 @@ void updateDialPos(SwitecX25 *motor, DialState state) {
       motor->setPosition(position);
       break;
   }
-  storeMotorPos();
+  //storeMotorPos();
 }
 
 unsigned int valToDialPos(float val, float min, float max) {
