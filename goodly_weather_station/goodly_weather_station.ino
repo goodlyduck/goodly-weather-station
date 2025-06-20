@@ -37,7 +37,8 @@ enum class DisplayState {
   MENU,
   PLOT,
   SUMMARY,
-  SCREENSAVER // Added screensaver state
+  FORECAST,
+  SCREENSAVER
 };
 
 DisplayState displayState = DisplayState::MENU;
@@ -52,10 +53,10 @@ enum class DialState {
   OFF
 };
 
-DialState dialStateTop = DialState::TEMPERATURE_OUT;
-DialState dialStateBottom = DialState::HUMIDITY;
-//DialState dialStateTop = DialState::OFF;
-//DialState dialStateBottom = DialState::OFF;
+//DialState dialStateTop = DialState::TEMPERATURE_OUT;
+//DialState dialStateBottom = DialState::HUMIDITY;
+DialState dialStateTop = DialState::OFF;
+DialState dialStateBottom = DialState::OFF;
 
 // DIAL LIMITS
 #define DIAL_TEMPERATURE_MAX 35
@@ -176,7 +177,7 @@ bool updatePlot;
 bool updateAxes;
 bool newSensorReadings = false;
 bool logging = false;
-bool zeroDialsAtStartup = true;
+bool zeroDialsAtStartup = false;
 bool timeOk = false;
 bool clearLogPressed = false;
 
@@ -187,7 +188,7 @@ enum class MenuState { MAIN,
                        PLOT,
                        SETTINGS };
 MenuState menuState = MenuState::MAIN;
-const unsigned int menusLengths[] = { 5, 6, 5 };
+const unsigned int menusLengths[] = { 5, 6, 6 };
 const char *menuContents[][6] = {
   { "Plot",
     "Summary",
@@ -202,6 +203,7 @@ const char *menuContents[][6] = {
     "Return" },
   { "Top dial",
     "Bottom dial",
+    "Center dials",
     "Logging",
     "Clear log",
     "Return" }
@@ -280,6 +282,15 @@ int marqueeY = 0;
 int marqueeDir = 1;
 int marqueeTextWidth = 0;
 
+#define PRESSURE_HISTORY_SIZE 24
+#define PRESSURE_HISTORY_DIFFERENCE 1  // Difference in pressure to consider a new reading
+#define PRESSURE_HISTORY_INTERVAL_MINUTES 60 // 60 minutes normally?
+float pressureHistory[PRESSURE_HISTORY_SIZE] = {INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER, INVALID_NUMBER};
+unsigned long pressureHistoryMillis = 0;
+
+unsigned long forecastMinutes = 0;
+int forecastPresGradDir = 0;
+
 void setup() {
   initSerial();
   initDisplay();
@@ -289,8 +300,8 @@ void setup() {
   initSd();
   //removeDataLogFile();
   initDataLogFile();
-  initWifi();
-  initTime();
+  //initWifi();
+  //initTime();
   // initDht();
   initSteppers();
   readSensors();
@@ -379,13 +390,14 @@ void loop() {
                   menuSelIdx = 0;
                 } else if (isMenuSelection("Summary")) {
                   setDisplayState(DisplayState::SUMMARY);
+                } else if (isMenuSelection("Forecast")) {
+                  setDisplayState(DisplayState::FORECAST);
                 }
                 break;
               case MenuState::PLOT:
                 if (isMenuSelection("Return")) {
                   menuState = MenuState::MAIN;
-                }
-                else {
+                } else {
                   plotVarsIdx = menuSelIdx;
                   plotHoursIdx = 2;
                   setDisplayState(DisplayState::PLOT);
@@ -422,7 +434,10 @@ void loop() {
                   } else {
                     dialStateBottom = (DialState)((int)dialStateBottom + 1);
                   }
-                }
+                } else if (isMenuSelection("Center dials")) {
+                    zeroDials();
+                    setDisplayState(DisplayState::MENU);
+                  }
                 break;
             }
           }
@@ -434,9 +449,14 @@ void loop() {
             setDisplayState(DisplayState::MENU);
           }
           break;
-
         case DisplayState::SUMMARY:
           displaySummary();
+          if (encPushd && !encPushdPrev) {
+            setDisplayState(DisplayState::MENU);
+          }
+          break;
+        case DisplayState::FORECAST:
+          displayForecast();
           if (encPushd && !encPushdPrev) {
             setDisplayState(DisplayState::MENU);
           }
@@ -506,6 +526,7 @@ void loop() {
       && (millis() - lastInputMillis > SENSOR_READ_INPUT_DLY_SEC * 1000)) {
     readSensors();
     arbitrateSensorReadings();
+    forecastWeather();
     getTimeStamp();
     if (timeOk && millis() - lastLogMillis > LOG_INTERV_SEC * 1000 && logging) {
       logData();
@@ -834,6 +855,24 @@ void arbitrateSensorReadings() {
     pressure_ok = true;
   } else {
     pressure_ok = false;
+  }
+
+  // Store pressure in circular buffer
+  if (millis() - pressureHistoryMillis > PRESSURE_HISTORY_INTERVAL_MINUTES * 60 * 1000) {
+    pressureHistoryMillis = millis();
+    // Shift the pressure history
+    for (int i = 0; i < PRESSURE_HISTORY_SIZE - 1; i++) {
+      pressureHistory[i] = pressureHistory[i + 1];
+    }
+    // Add the new pressure reading to the end of the history
+    // If pressure is valid, store it, otherwise store INVALID_NUMBER
+    // This way we always have the latest reading at the end of the array
+    // and the oldest reading at the start of the array
+    if (pressure_ok) {
+      pressureHistory[PRESSURE_HISTORY_SIZE - 1] = pressure;
+    } else {
+      pressureHistory[PRESSURE_HISTORY_SIZE - 1] = INVALID_NUMBER;
+    }
   }
 
   // Humidity
@@ -1214,6 +1253,7 @@ float min(float a, float b) {
 void displayScreensaver() {
   // Calculate text width
   display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
   screensaverText = String(temperature_out, 1) + " C";
   marqueeTextWidth = screensaverText.length() * charWidth * 2; // Adjust for text size 2
 
@@ -1235,4 +1275,77 @@ void displayScreensaver() {
   // Clamp to bounds
   if (marqueeX < minX) marqueeX = minX;
   if (marqueeX > maxX) marqueeX = maxX;
+}
+
+void forecastWeather() {
+  forecastPresGradDir = 0;
+  forecastMinutes = 0;
+
+  for (int i = PRESSURE_HISTORY_SIZE - 1; i >= 0; i--) {
+    if (pressureHistory[i - 1] == INVALID_NUMBER || pressureHistory[i] == INVALID_NUMBER) {
+      break;  // Stop if we hit an invalid number
+    } else {
+      if (pressureHistory[i] - pressureHistory[i - 1] > PRESSURE_HISTORY_DIFFERENCE) {
+        if (forecastPresGradDir < 0) {
+          break; // Stop if the trend changes
+        } else {
+          forecastPresGradDir = 1;
+        }
+      } else if (pressureHistory[i] - pressureHistory[i - 1] < -PRESSURE_HISTORY_DIFFERENCE) {
+        if (forecastPresGradDir > 0) {
+          break; // Stop if the trend changes
+        } else {
+          forecastPresGradDir = -1;
+        }
+      } else if (abs(pressureHistory[i] - pressureHistory[PRESSURE_HISTORY_SIZE - 1]) > PRESSURE_HISTORY_DIFFERENCE) {
+        break;  // Break if pressure gradient is small but the last value is significantly different from first
+      }
+      forecastMinutes += PRESSURE_HISTORY_INTERVAL_MINUTES;
+    }
+  }
+}
+
+void displayForecast() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.setTextSize(1);
+
+  display.println("");
+  display.println("Weather Forecast");
+  display.println("");
+
+  unsigned int hours = forecastMinutes / 60;  // Convert to hours
+
+  // Display the pressure gradient direction
+  if (forecastMinutes > 0) {
+    display.print("Last ");
+    if (hours > 0) {
+      display.print(hours);
+      display.print(" hours:");
+    } else {
+      display.print(forecastMinutes);
+      display.print(" minutes:");
+    }
+    display.print(" pressure ");
+    if (forecastPresGradDir > 0) {
+      display.println("rising");
+    } else if (forecastPresGradDir < 0) {
+      display.println("falling");
+    } else {
+      display.println("stable");
+    }
+  } else {
+    display.println("No pressure data available");
+  }
+
+  //debug print the pressure history
+  for (int i = PRESSURE_HISTORY_SIZE - 1; i >= 0; i--) {
+    if (pressureHistory[i] != INVALID_NUMBER) {
+      display.print(pressureHistory[i]);
+      display.print(" ");
+    }
+  }
+
+  display.display();
 }
