@@ -315,13 +315,13 @@ void loop() {
   }
 
   if (useDisplayOff) {
-  if (millis() - lastInputMillis < DISPLAY_OFF_SEC * 1000) {
-    setDisplayOn();
+    if (millis() - lastInputMillis < DISPLAY_OFF_SEC * 1000) {
+      setDisplayOn();
     } else if (useDisplayOff) {
-    setDisplayOff();
-    displayState = DisplayState::SUMMARY;
-    clearLogPressed = false;
-  }
+      setDisplayOff();
+      displayState = DisplayState::SUMMARY;
+      clearLogPressed = false;
+    }
   }
 
   if (useScreensaver && displayOn) {
@@ -1130,7 +1130,7 @@ void getTimeStamp() {
   } else {
     timeOk = false;
     if (logging) {
-    displayMessage("No WiFi, no timestamp");
+      displayMessage("No WiFi, no timestamp");
     }
   }
 }

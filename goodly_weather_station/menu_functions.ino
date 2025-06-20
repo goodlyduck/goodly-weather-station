@@ -1,5 +1,6 @@
 void displayMenu(const char* items[], int length, int index) {
   display.clearDisplay();
+  display.setTextSize(1);
   for (int i = 0; i < length; i++) {
     if (i == index) {
       display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);  // Highlight selected
