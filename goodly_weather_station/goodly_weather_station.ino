@@ -36,7 +36,8 @@ enum class DisplayState {
   SENSORS,
   MENU,
   PLOT,
-  SUMMARY
+  SUMMARY,
+  SCREENSAVER // Added screensaver state
 };
 
 DisplayState displayState = DisplayState::MENU;
@@ -88,10 +89,12 @@ DialState dialStateBottom = DialState::HUMIDITY;
 // USER DEFINES
 #define INVALID_NUMBER -9999
 #define MESSAGE_SIGN_SEC 0.5
+#define MESSAGE_SEC 60
 #define DISPLAY_OFF_SEC 60
+#define SCREENSAVER_ON_SEC 60
 #define DISPLAY_LINES 8   // For font size 1
 #define DISPLAY_CHARS 21  // For font size 1
-#define SENSOR_READ_INTERV_SEC 60
+#define SENSOR_READ_INTERV_SEC 10
 #define LOG_INTERV_SEC 60 * 10
 #define SENSOR_READ_INPUT_DLY_SEC 5
 //#define SENSOR_READ_INPUT_DLY_SEC 5
@@ -143,7 +146,6 @@ const int yLabelWidth = charWidth * 4 + 1;
 unsigned long lastInputMillis = millis();
 unsigned long lastMessageMillis = 0;
 bool messageActive = false;
-bool messageActivePrev = false;
 unsigned long lastMessageSignMillis = 0;
 bool messageSignActive = false;
 bool messageSignActivePrev = false;
@@ -266,6 +268,17 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
 bool displayOn = true;
 bool displayOnPrev = false;
 
+// Screensaver variables
+bool useScreensaver = true;
+bool useDisplayOff = false;
+unsigned long lastMarqueeUpdate = 0;
+unsigned int marqueeSpeed = 50; // ms between marquee updates
+String screensaverText = "Goodly Weather Station";
+int marqueeX = 0;
+int marqueeY = 0;
+int marqueeDir = 1;
+int marqueeTextWidth = 0;
+
 void setup() {
   initSerial();
   initDisplay();
@@ -301,17 +314,38 @@ void loop() {
     //Serial.println("Input");
   }
 
+  if (useDisplayOff) {
   if (millis() - lastInputMillis < DISPLAY_OFF_SEC * 1000) {
     setDisplayOn();
-  } else {
+    } else if (useDisplayOff) {
     setDisplayOff();
     displayState = DisplayState::SUMMARY;
     clearLogPressed = false;
   }
+  }
 
-  if (displayOn && !displayOnPrev) {
-    // Ignore encoder if display was off
+  if (useScreensaver && displayOn) {
+    if (millis() - lastInputMillis > SCREENSAVER_ON_SEC * 1000) {
+      setDisplayState(DisplayState::SCREENSAVER);
+      display.ssd1306_command(0x81); // SSD1306_SETCONTRAST command
+      display.ssd1306_command(1);    // Lower value for dimmer display (0-255)
+    } else if (displayState == DisplayState::SCREENSAVER) {
+      setDisplayState(DisplayState::SUMMARY);
+      display.ssd1306_command(0x81);
+      display.ssd1306_command(255); // Lower value for dimmer display (0-255)
+      clearLogPressed = false;
+    }
+  }
+
+  if ((displayOn && !displayOnPrev) || 
+      (displayState != DisplayState::SCREENSAVER &&
+      displayStatePrev == DisplayState::SCREENSAVER)) {
+    // Ignore encoder if display was off or screensaver was active
     encPosPrev = encPos;
+  }
+
+  if (millis() - lastMessageMillis > MESSAGE_SEC * 1000) {
+    messageActive = false;
   }
 
   if (displayOn) {
@@ -446,6 +480,18 @@ void loop() {
           if (encPushd && !encPushdPrev) {
             setDisplayState(DisplayState::MENU);
             menuState = MenuState::MAIN;
+          }
+          break;
+
+        case DisplayState::SCREENSAVER:
+          if (millis() - lastMarqueeUpdate > marqueeSpeed) {
+            displayScreensaver();
+            lastMarqueeUpdate = millis();
+          }
+          // Exit screensaver on encoder input
+          if (encPos != encPosPrev || (encPushd && !encPushdPrev)) {
+            setDisplayState(DisplayState::MENU);
+            lastInputMillis = millis();
           }
           break;
       }
@@ -1083,7 +1129,9 @@ void getTimeStamp() {
     timeStamp = formattedDate.substring(splitT + 1, formattedDate.length() - 1);
   } else {
     timeOk = false;
+    if (logging) {
     displayMessage("No WiFi, no timestamp");
+    }
   }
 }
 
@@ -1156,4 +1204,30 @@ int min(int a, int b) {
 
 float min(float a, float b) {
   return (a < b) ? a : b;
+}
+
+void displayScreensaver() {
+  // Calculate text width
+  display.setTextSize(2);
+  screensaverText = String(temperature_out, 1) + " C";
+  marqueeTextWidth = screensaverText.length() * charWidth * 2; // Adjust for text size 2
+
+  int minX = 0;
+  int maxX = SCREEN_WIDTH - marqueeTextWidth;
+  // If just started or finished, pick new direction and Y
+  if (marqueeX <= minX || marqueeX >= maxX) {
+    marqueeY = random(0, SCREEN_HEIGHT - charHeight * 2); // Adjust for text size 2
+    marqueeDir = (random(0, 2) == 0) ? 1 : -1;
+    // Clamp direction if at edge
+    if (marqueeX <= minX) marqueeDir = 1;
+    if (marqueeX >= maxX) marqueeDir = -1;
+  }
+  display.clearDisplay();
+  display.setCursor(marqueeX, marqueeY);
+  display.print(screensaverText);
+  display.display();
+  marqueeX += marqueeDir;
+  // Clamp to bounds
+  if (marqueeX < minX) marqueeX = minX;
+  if (marqueeX > maxX) marqueeX = maxX;
 }
