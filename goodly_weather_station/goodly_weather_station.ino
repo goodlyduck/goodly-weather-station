@@ -48,6 +48,7 @@ enum class DialState {
   TEMPERATURE_OUT,
   PRESSURE,
   HUMIDITY,
+  CENTER,
   OFF
 };
 
@@ -881,6 +882,10 @@ void updateDialPos(SwitecX25 *motor, DialState state) {
       break;
     case DialState::HUMIDITY:
       position = valToDialPos(humidity_rel, DIAL_HUMIDITY_MIN, DIAL_HUMIDITY_MAX);
+      motor->setPosition(position);
+      break;
+    case DialState::CENTER:
+      position = valToDialPos(0, -1, 1);
       motor->setPosition(position);
       break;
   }

@@ -42,8 +42,11 @@ void printDialState(DialState state) {
     case DialState::HUMIDITY:
       display.print(": Humidity");
       break;
+    case DialState::CENTER:
+      display.print(": Center");
+      break;
     case DialState::OFF:
-      display.print(": OFF");
+      display.print(": Off");
       break;
   }
 }
