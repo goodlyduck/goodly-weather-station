@@ -9,6 +9,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <OneWire.h>
+#include <PubSubClient.h> // MQTT library
 //#include <time.h>
 #include <DHT22.h>
 #include <RTClib.h>
@@ -20,6 +21,7 @@
 #include <Adafruit_BMP085_U.h>
 #include "src/SwitecX25/SwitecX25.h"
 #include "src/NTPClient/NTPClient.h"
+#include "src/wifi_credentials.h"
 
 // TIME
 WiFiUDP ntpUDP;
@@ -291,6 +293,11 @@ unsigned long pressureHistoryMillis = 0;
 unsigned long forecastMinutes = 0;
 int forecastPresGradDir = 0;
 
+const char* mqtt_server = "192.168.1.184";
+const int mqtt_port = 1883;
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
 void setup() {
   initSerial();
   initDisplay();
@@ -300,7 +307,7 @@ void setup() {
   initSd();
   //removeDataLogFile();
   initDataLogFile();
-  //initWifi();
+  initWifi();
   //initTime();
   // initDht();
   initSteppers();
@@ -315,6 +322,9 @@ void setup() {
   lastInputMillis = millis();
   lastLogMillis = millis();  //Delay first log (sensor startup?)
   messageActive = false;
+
+  // Initialize MQTT client
+  mqttClient.setServer(mqtt_server, mqtt_port);
 }
 
 void loop() {
@@ -540,6 +550,13 @@ void loop() {
 
   motor1->update();
   motor2->update();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!mqttClient.connected()) {
+      reconnectMQTT();
+    }
+    mqttClient.loop();
+  }
 }
 
 // INIT FUNCTIONS
@@ -694,9 +711,10 @@ void initSteppers() {
 }
 
 void initWifi() {
-  String password;
-  String ssid;
   displayMessage("Initializing WiFi");
+
+/*   String password;
+  String ssid;
   File file = SD.open(WIFI_FILE);
   if (file) {
     if (file.available()) {
@@ -714,9 +732,10 @@ void initWifi() {
   } else {
     displayMessage("Could not open " + String(WIFI_FILE));
     return;
-  }
+  } */
+
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
+  WiFi.begin(wifi_ssid, wifi_password);
   // Will try for about 10 seconds (20x 500ms)
   int tryDelay = 500;
   int numberOfTries = 20;
@@ -1348,4 +1367,31 @@ void displayForecast() {
   }
 
   display.display();
+}
+
+void reconnectMQTT() {
+  static unsigned long lastAttempt = 0;
+  static bool connecting = false;
+  const unsigned long retryInterval = 5000; // 5 seconds
+
+  if (mqttClient.connected()) {
+    connecting = false;
+    return;
+  }
+
+  unsigned long now = millis();
+  if (!connecting || now - lastAttempt > retryInterval) {
+    connecting = true;
+    lastAttempt = now;
+    Serial.print("Attempting MQTT connection...");
+    if (mqttClient.connect("GoodlyWeatherStation")) {
+      Serial.println("connected");
+      connecting = false;
+      // You can subscribe or publish here if needed
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" try again in 5 seconds");
+    }
+  }
 }
