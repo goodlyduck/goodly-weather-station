@@ -538,6 +538,7 @@ void loop() {
     arbitrateSensorReadings();
     forecastWeather();
     getTimeStamp();
+    publishSensorDataToMQTT();
     if (timeOk && millis() - lastLogMillis > LOG_INTERV_SEC * 1000 && logging) {
       logData();
       lastLogMillis = millis();
@@ -1387,11 +1388,33 @@ void reconnectMQTT() {
     if (mqttClient.connect("GoodlyWeatherStation")) {
       Serial.println("connected");
       connecting = false;
-      // You can subscribe or publish here if needed
+      
     } else {
       Serial.print("failed, rc=");
       Serial.print(mqttClient.state());
       Serial.println(" try again in 5 seconds");
+    }
+  }
+}
+
+void publishSensorDataToMQTT() {
+  if (WiFi.status() == WL_CONNECTED && mqttClient.connected()) {
+    char payload[32];
+    if (temperature_in_ok) {
+      snprintf(payload, sizeof(payload), "%.2f", temperature_in);
+      mqttClient.publish("home/gws/temperature_in", payload, true);
+    }
+    if (temperature_out_ok) {
+      snprintf(payload, sizeof(payload), "%.2f", temperature_out);
+      mqttClient.publish("home/gws/temperature_out", payload, true);
+    }
+    if (pressure_ok) {
+      snprintf(payload, sizeof(payload), "%.2f", pressure);
+      mqttClient.publish("home/gws/pressure", payload, true);
+    }
+    if (humidity_rel_ok) {
+      snprintf(payload, sizeof(payload), "%.2f", humidity_rel);
+      mqttClient.publish("home/gws/humidity", payload, true);
     }
   }
 }
