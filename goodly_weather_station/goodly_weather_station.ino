@@ -1402,19 +1402,23 @@ void publishSensorDataToMQTT() {
     char payload[32];
     if (temperature_in_ok) {
       snprintf(payload, sizeof(payload), "%.2f", temperature_in);
-      mqttClient.publish("home/gws/temperature_in", payload, true);
+      mqttClient.publish("home/gws/temperature_in", payload, false);
     }
     if (temperature_out_ok) {
       snprintf(payload, sizeof(payload), "%.2f", temperature_out);
-      mqttClient.publish("home/gws/temperature_out", payload, true);
+      mqttClient.publish("home/gws/temperature_out", payload, false);
+    }
+    if (temperature_pcb_ok) {
+      snprintf(payload, sizeof(payload), "%.2f", temperature_pcb);
+      mqttClient.publish("home/gws/temperature_pcb", payload, false);
     }
     if (pressure_ok) {
       snprintf(payload, sizeof(payload), "%.2f", pressure);
-      mqttClient.publish("home/gws/pressure", payload, true);
+      mqttClient.publish("home/gws/pressure", payload, false);
     }
     if (humidity_rel_ok) {
       snprintf(payload, sizeof(payload), "%.2f", humidity_rel);
-      mqttClient.publish("home/gws/humidity", payload, true);
+      mqttClient.publish("home/gws/humidity", payload, false);
     }
   }
 }
