@@ -29,9 +29,16 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP085_U.h>
+#include <EEPROM.h>
 #include "src/SwitecX25/SwitecX25.h"
 #include "src/NTPClient/NTPClient.h"
+#if __has_include("src/wifi_credentials.h")
 #include "src/wifi_credentials.h"
+#else
+const char wifi_ssid[] = "";
+const char wifi_password[] = "";
+#endif
+#include <Preferences.h>
 
 // TIME
 WiFiUDP ntpUDP;
@@ -121,10 +128,12 @@ DialState dialStateBottom = DialState::OFF;
 #define DATA_LOG_FILE "/datalog.txt"
 #define DATA_LOG_HEADER "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
 #define DIAL_POS_FILE "/dialpos.txt"
+#else
+#define LOG_BUFFER_RESERVE_BYTES (24UL * 1024UL)
+#define LOG_BUFFER_MIN_ENTRIES 128
+#define MIN_LOG_INTERV_SEC 10
+#define LOG_COMPACT_MIN_SAVINGS 8
 #endif
-
-#define WIFI_FILE "/wifi.txt"
-#define WIFI_RETRY_SEC 10
 
 #define TEMP_PLAUS_MIN -60
 #define TEMP_PLAUS_MAX 60
@@ -134,6 +143,14 @@ DialState dialStateBottom = DialState::OFF;
 #define HUM_PLAUS_MAX 100
 
 #define NTP_TIMEOUT_SEC 5
+#define EEPROM_SIZE 512
+#define WIFI_EEPROM_MAGIC 0x57A1
+#define WIFI_EEPROM_MAGIC_ADDR 0
+#define WIFI_EEPROM_SSID_LEN_ADDR 2
+#define WIFI_EEPROM_PASS_LEN_ADDR 3
+#define WIFI_EEPROM_DATA_ADDR 4
+#define WIFI_MAX_SSID_LEN 32
+#define WIFI_MAX_PASS_LEN 63
 
 // ROTARY ENCODER PUSH BUTTON
 // detachInterrupt(GPIOPin);
@@ -186,15 +203,53 @@ unsigned int currentMessageLine = 0;
 String messages[DISPLAY_LINES];
 unsigned int storedDialPosTop;
 unsigned int storedDialPosBottom;
+Preferences motorPosPrefs;
+Preferences dialStatePrefs;
+Preferences plotStatePrefs;
 float plotHours[] = { 1.0, 12, 24, 24 * 7, 24 * 30, 24 * 365, 24 * 365 * 2, 24 * 365 * 5, 24 * 365 * 10, 24 * 365 * 20, 24 * 365 * 50, 24 * 365 * 100 };
 unsigned int plotHoursIdx = 2;
-#if USE_SD
 bool newLogData;
+unsigned int effectiveLogIntervSec = LOG_INTERV_SEC;
+#if !USE_SD
+struct LogEntry;
+unsigned int plotRangeIntervalsSec[sizeof(plotHours) / sizeof(plotHours[0])] = { 0 };
+struct LogEntry {
+  unsigned long epoch;
+  float tempIn;
+  float tempOut;
+  float tempPcb;
+  float hum;
+  float pres;
+  float tempInMin;
+  float tempInMax;
+  float tempOutMin;
+  float tempOutMax;
+  float tempPcbMin;
+  float tempPcbMax;
+  float humMin;
+  float humMax;
+  float presMin;
+  float presMax;
+  uint16_t tempInSamples;
+  uint16_t tempOutSamples;
+  uint16_t tempPcbSamples;
+  uint16_t humSamples;
+  uint16_t presSamples;
+  bool tempInOk;
+  bool tempOutOk;
+  bool tempPcbOk;
+  bool humOk;
+  bool presOk;
+};
+LogEntry *logBuffer = nullptr;
+unsigned int logBufferCapacity = 0;
+unsigned int logBufferHead = 0;
+unsigned int logBufferCount = 0;
 #endif
 bool updatePlot;
 bool updateAxes;
 bool newSensorReadings = false;
-bool logging = false;
+bool logging = true;
 bool zeroDialsAtStartup = false;
 bool timeOk = false;
 bool clearLogPressed = false;
@@ -330,20 +385,32 @@ void setup() {
   initDataLogFile();
 #endif
   initWifi();
+#if !USE_SD
+  initAdaptiveLogIntervals();
+#endif
   //initTime();
   // initDht();
+  readDialStates();
+  readPlotSettings();
   initSteppers();
+#if !USE_SD
+  initLogBuffer();
+#endif
   readSensors();
   arbitrateSensorReadings();
   getTimeStamp();
+  logData();  // Log initial boot data point so plots aren't empty
   updateDialPos(motor1, dialStateTop);
   updateDialPos(motor2, dialStateBottom);
 
   encPosPrev = encoder_position;
   encPushdPrev = true;
   lastInputMillis = millis();
-  lastLogMillis = millis();  //Delay first log (sensor startup?)
-  messageActive = false;
+  lastLogMillis = millis();  // Delay first periodic log (sensor startup?)
+  
+  // Keep startup messages visible for MESSAGE_SEC seconds
+  lastMessageMillis = millis();
+  messageActive = true;
 
   // Initialize MQTT client
   mqttClient.setServer(mqtt_server, mqtt_port);
@@ -431,7 +498,7 @@ void loop() {
                   menuState = MenuState::MAIN;
                 } else {
                   plotVarsIdx = menuSelIdx;
-                  plotHoursIdx = 2;
+                  plotUseRange = true;
                   setDisplayState(DisplayState::PLOT);
                   menuState = MenuState::MAIN;
                 }
@@ -460,12 +527,14 @@ void loop() {
                   } else {
                     dialStateTop = (DialState)((int)dialStateTop + 1);
                   }
+                  saveDialStates();
                 } else if (isMenuSelection("Bottom dial")) {
                   if (dialStateBottom == DialState::OFF) {
                     dialStateBottom = (DialState)0;
                   } else {
                     dialStateBottom = (DialState)((int)dialStateBottom + 1);
                   }
+                  saveDialStates();
                 } else if (isMenuSelection("Center dials")) {
                     zeroDials();
                     setDisplayState(DisplayState::MENU);
@@ -514,12 +583,10 @@ void loop() {
             updateAxes = true;
             updatePlot = true;
           }
-#if USE_SD
           if (newLogData && !messageSignActive) {
             updatePlot = true;
             newLogData = false;
           }
-#endif
           if (updateAxes) {
             plotAxes(plotHours[plotHoursIdx], plotTitle[plotVarsIdx]);
             updateAxes = false;
@@ -533,8 +600,14 @@ void loop() {
             displayStatePrev = displayState;
           }
           if (encPushd && !encPushdPrev) {
-            setDisplayState(DisplayState::MENU);
-            menuState = MenuState::MAIN;
+            if (plotUseRange) {
+              plotUseRange = false;
+              updateAxes = true;
+              updatePlot = true;
+            } else {
+              setDisplayState(DisplayState::MENU);
+              menuState = MenuState::MAIN;
+            }
           }
           break;
 
@@ -564,10 +637,15 @@ void loop() {
     getTimeStamp();
     publishSensorDataToMQTT();
 #if USE_SD
-    if (timeOk && millis() - lastLogMillis > LOG_INTERV_SEC * 1000 && logging) {
+    if (timeOk && millis() - lastLogMillis > (unsigned long)effectiveLogIntervSec * 1000UL && logging) {
       logData();
       lastLogMillis = millis();
       //catFileSerial(DATA_LOG_FILE);
+    }
+#else
+    if (millis() - lastLogMillis > (unsigned long)effectiveLogIntervSec * 1000UL && logging) {
+      logData();
+      lastLogMillis = millis();
     }
 #endif
   }
@@ -692,6 +770,88 @@ void initSerial() {
   // while (!Serial) {}
 }
 
+bool saveWiFiCredentialsToEEPROM(const String &ssid, const String &password) {
+  if (ssid.length() == 0) {
+    return false;
+  }
+
+  String trimmedSsid = ssid;
+  String trimmedPassword = password;
+  if (trimmedSsid.length() > WIFI_MAX_SSID_LEN) {
+    trimmedSsid = trimmedSsid.substring(0, WIFI_MAX_SSID_LEN);
+  }
+  if (trimmedPassword.length() > WIFI_MAX_PASS_LEN) {
+    trimmedPassword = trimmedPassword.substring(0, WIFI_MAX_PASS_LEN);
+  }
+
+  if (!EEPROM.begin(EEPROM_SIZE)) {
+    return false;
+  }
+
+  EEPROM.write(WIFI_EEPROM_MAGIC_ADDR, WIFI_EEPROM_MAGIC & 0xFF);
+  EEPROM.write(WIFI_EEPROM_MAGIC_ADDR + 1, (WIFI_EEPROM_MAGIC >> 8) & 0xFF);
+  EEPROM.write(WIFI_EEPROM_SSID_LEN_ADDR, (uint8_t)trimmedSsid.length());
+  EEPROM.write(WIFI_EEPROM_PASS_LEN_ADDR, (uint8_t)trimmedPassword.length());
+
+  for (int i = 0; i < WIFI_MAX_SSID_LEN; i++) {
+    char ch = (i < trimmedSsid.length()) ? trimmedSsid[i] : 0;
+    EEPROM.write(WIFI_EEPROM_DATA_ADDR + i, (uint8_t)ch);
+  }
+  for (int i = 0; i < WIFI_MAX_PASS_LEN; i++) {
+    char ch = (i < trimmedPassword.length()) ? trimmedPassword[i] : 0;
+    EEPROM.write(WIFI_EEPROM_DATA_ADDR + WIFI_MAX_SSID_LEN + i, (uint8_t)ch);
+  }
+
+  bool committed = EEPROM.commit();
+  EEPROM.end();
+  return committed;
+}
+
+bool isValidDialState(int state) {
+  return state >= (int)DialState::TEMPERATURE_IN && state <= (int)DialState::OFF;
+}
+
+void saveDialStates() {
+  dialStatePrefs.begin("dialstate", false);
+  dialStatePrefs.putUChar("top", (uint8_t)dialStateTop);
+  dialStatePrefs.putUChar("bottom", (uint8_t)dialStateBottom);
+  dialStatePrefs.end();
+}
+
+void readDialStates() {
+  dialStatePrefs.begin("dialstate", true);
+  int storedTop = dialStatePrefs.getUChar("top", (uint8_t)DialState::TEMPERATURE_IN);
+  int storedBottom = dialStatePrefs.getUChar("bottom", (uint8_t)DialState::PRESSURE);
+
+  if (isValidDialState(storedTop)) {
+    dialStateTop = (DialState)storedTop;
+  }
+  if (isValidDialState(storedBottom)) {
+    dialStateBottom = (DialState)storedBottom;
+  }
+
+  dialStatePrefs.end();
+}
+
+void savePlotSettings() {
+  plotStatePrefs.begin("plotstate", false);
+  plotStatePrefs.putUChar("hoursIdx", (uint8_t)plotHoursIdx);
+  plotStatePrefs.end();
+}
+
+void readPlotSettings() {
+  plotStatePrefs.begin("plotstate", true);
+  unsigned int maxIdx = (sizeof(plotHours) / sizeof(plotHours[0])) - 1;
+  unsigned int storedIdx = plotStatePrefs.getUChar("hoursIdx", 2);
+  if (storedIdx <= maxIdx) {
+    plotHoursIdx = storedIdx;
+  } else {
+    plotHoursIdx = 2;
+  }
+
+  plotStatePrefs.end();
+}
+
 #if USE_DS18B20
 void initDs() {
   // DS18B20 INIT
@@ -710,13 +870,13 @@ void zeroDials() {
   //motor1->updateBlocking();
   //motor2->updateBlocking();
 
-  //storeMotorPos();
-
   displayMessage("Plz center top dial");
   zeroStepper(motor1);
 
   displayMessage("Plz center bottom dial");
   zeroStepper(motor2);
+
+  storeMotorPos();
 }
 
 void initSteppers() {
@@ -731,12 +891,7 @@ void initSteppers() {
   // display.clearDisplay();
   // display.setCursor(0, 0);
 
-#if USE_SD
   readMotorPos();
-#else
-  storedDialPosTop = 0;
-  storedDialPosBottom = 0;
-#endif
 
   motor1->setCurrentStep(storedDialPosTop);
   //displayMessage("Top: " + String(storedDialPosTop));
@@ -751,29 +906,138 @@ void initSteppers() {
 void initWifi() {
   displayMessage("Initializing WiFi");
 
-/*   String password;
-  String ssid;
-  File file = SD.open(WIFI_FILE);
-  if (file) {
-    if (file.available()) {
-      ssid = file.readStringUntil('\n');
-      ssid.trim();
-      // ssid = line.c_str();
-      displayMessage("WiFi: " + ssid);
+  String selectedSsid = String(wifi_ssid);
+  String selectedPassword = String(wifi_password);
+  String eepromSsid;
+  String eepromPassword;
+
+  if (EEPROM.begin(EEPROM_SIZE)) {
+    uint16_t magic = (uint16_t)EEPROM.read(WIFI_EEPROM_MAGIC_ADDR) | ((uint16_t)EEPROM.read(WIFI_EEPROM_MAGIC_ADDR + 1) << 8);
+    if (magic == WIFI_EEPROM_MAGIC) {
+      uint8_t ssidLen = EEPROM.read(WIFI_EEPROM_SSID_LEN_ADDR);
+      uint8_t passLen = EEPROM.read(WIFI_EEPROM_PASS_LEN_ADDR);
+      if (ssidLen > 0 && ssidLen <= WIFI_MAX_SSID_LEN && passLen <= WIFI_MAX_PASS_LEN) {
+        char ssidBuf[WIFI_MAX_SSID_LEN + 1];
+        char passBuf[WIFI_MAX_PASS_LEN + 1];
+        for (int i = 0; i < ssidLen; i++) {
+          ssidBuf[i] = (char)EEPROM.read(WIFI_EEPROM_DATA_ADDR + i);
+        }
+        ssidBuf[ssidLen] = '\0';
+        for (int i = 0; i < passLen; i++) {
+          passBuf[i] = (char)EEPROM.read(WIFI_EEPROM_DATA_ADDR + WIFI_MAX_SSID_LEN + i);
+        }
+        passBuf[passLen] = '\0';
+        eepromSsid = String(ssidBuf);
+        eepromPassword = String(passBuf);
+        if (eepromSsid.length() > 0) {
+          selectedSsid = eepromSsid;
+          selectedPassword = eepromPassword;
+          Serial.println("[WiFi] Loaded credentials from EEPROM.");
+        }
+      }
     }
-    if (file.available()) {
-      password = file.readStringUntil('\n');
-      password.trim();
-      // password = line.c_str();
-      //displayMessage(password);
+  }
+
+  Serial.println("[WiFi] Press 'w' within 5 seconds to configure WiFi over UART.");
+  unsigned long uartStart = millis();
+  bool runWizard = false;
+  while (millis() - uartStart < 5000) {
+    if (Serial.available()) {
+      char c = (char)Serial.read();
+      if (c == 'w' || c == 'W') {
+        runWizard = true;
+      }
+      while (Serial.available()) {
+        Serial.read();
+      }
+      break;
     }
-  } else {
-    displayMessage("Could not open " + String(WIFI_FILE));
+    delay(10);
+  }
+
+  if (runWizard) {
+    WiFi.mode(WIFI_STA);
+    Serial.println("\n=== WiFi Setup Wizard ===");
+    Serial.println("Scanning networks...");
+    int networkCount = WiFi.scanNetworks();
+
+    if (networkCount <= 0) {
+      Serial.println("No WiFi networks found.");
+    } else {
+      for (int i = 0; i < networkCount; i++) {
+        Serial.print(i + 1);
+        Serial.print(": ");
+        Serial.print(WiFi.SSID(i));
+        Serial.print(" (RSSI ");
+        Serial.print(WiFi.RSSI(i));
+        Serial.print(" dBm, ");
+        Serial.print((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "open" : "secured");
+        Serial.println(")");
+      }
+
+      Serial.println("Enter network number and press Enter:");
+      Serial.setTimeout(60000);
+      String line = Serial.readStringUntil('\n');
+      line.trim();
+      int selectedIdx = line.toInt() - 1;
+
+      if (selectedIdx >= 0 && selectedIdx < networkCount) {
+        selectedSsid = WiFi.SSID(selectedIdx);
+        if (WiFi.encryptionType(selectedIdx) == WIFI_AUTH_OPEN) {
+          selectedPassword = "";
+        } else {
+          Serial.println("Enter password and press Enter:");
+          String pass = Serial.readStringUntil('\n');
+          pass.trim();
+          selectedPassword = pass;
+        }
+
+        if (selectedSsid.length() > WIFI_MAX_SSID_LEN) {
+          selectedSsid = selectedSsid.substring(0, WIFI_MAX_SSID_LEN);
+        }
+        if (selectedPassword.length() > WIFI_MAX_PASS_LEN) {
+          selectedPassword = selectedPassword.substring(0, WIFI_MAX_PASS_LEN);
+        }
+
+        EEPROM.write(WIFI_EEPROM_MAGIC_ADDR, WIFI_EEPROM_MAGIC & 0xFF);
+        EEPROM.write(WIFI_EEPROM_MAGIC_ADDR + 1, (WIFI_EEPROM_MAGIC >> 8) & 0xFF);
+        EEPROM.write(WIFI_EEPROM_SSID_LEN_ADDR, (uint8_t)selectedSsid.length());
+        EEPROM.write(WIFI_EEPROM_PASS_LEN_ADDR, (uint8_t)selectedPassword.length());
+
+        for (int i = 0; i < WIFI_MAX_SSID_LEN; i++) {
+          char ch = (i < selectedSsid.length()) ? selectedSsid[i] : 0;
+          EEPROM.write(WIFI_EEPROM_DATA_ADDR + i, (uint8_t)ch);
+        }
+        for (int i = 0; i < WIFI_MAX_PASS_LEN; i++) {
+          char ch = (i < selectedPassword.length()) ? selectedPassword[i] : 0;
+          EEPROM.write(WIFI_EEPROM_DATA_ADDR + WIFI_MAX_SSID_LEN + i, (uint8_t)ch);
+        }
+
+        if (EEPROM.commit()) {
+          Serial.println("WiFi credentials saved to EEPROM.");
+        } else {
+          Serial.println("Failed to save WiFi credentials to EEPROM.");
+        }
+      } else {
+        Serial.println("Invalid selection. Using existing credentials.");
+      }
+    }
+  }
+
+  if (selectedSsid.length() == 0) {
+    Serial.println("[WiFi] No credentials loaded. Use UART wizard with 'w'.");
+    displayMessage("No WiFi credentials");
     return;
-  } */
+  }
+
+  if (saveWiFiCredentialsToEEPROM(selectedSsid, selectedPassword)) {
+    Serial.println("[WiFi] Credentials stored in EEPROM.");
+  } else {
+    Serial.println("[WiFi] Failed to store credentials in EEPROM.");
+  }
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(wifi_ssid, wifi_password);
+  WiFi.begin(selectedSsid.c_str(), selectedPassword.c_str());
   // Will try for about 10 seconds (20x 500ms)
   int tryDelay = 500;
   int numberOfTries = 20;
@@ -989,7 +1253,7 @@ void updateDialPos(SwitecX25 *motor, DialState state) {
       motor->setPosition(position);
       break;
   }
-  //storeMotorPos();
+  storeMotorPos();
 }
 
 unsigned int valToDialPos(float val, float min, float max) {
@@ -1144,9 +1408,11 @@ void displaySummary() {
   display.print(temperature_in);
   display.println(" C");
 
+#if USE_DS18B20
   display.print("Temp out: ");
   display.print(temperature_out);
   display.println(" C");
+#endif
 
   display.print("Pressure: ");
   display.print(pressure);
@@ -1156,14 +1422,22 @@ void displaySummary() {
   display.print(humidity_rel);
   display.println(" %");
 
+#if !USE_DS18B20
   display.print("\n");
+#endif
 
   display.println(dateStamp + " " + timeStamp);
 
   if (logging) {
-    display.print("Logging: ON");
+    display.println("Logging: ON");
   } else {
-    display.print("Logging: OFF");
+    display.println("Logging: OFF");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    display.print("WiFi: ON");
+  } else {
+    display.print("WiFi: OFF");
   }
 
   display.display();
@@ -1276,36 +1550,371 @@ void logData() {
 }
 #endif
 
-#if USE_SD
-void storeMotorPos() {
-  File file = SD.open(DIAL_POS_FILE, FILE_WRITE);
-  if (file) {
-    file.println(motor1->getTargetPosition());
-    file.println(motor2->getTargetPosition());
-    file.close();
-    //catFileSerial(DIAL_POS_FILE);
-  } else {
-    displayMessage("Error writing " + String(DIAL_POS_FILE));
+#if !USE_SD
+unsigned int getPlotDataPoints() {
+  int points = SCREEN_WIDTH - yLabelWidth - 1;
+  if (points < 1) {
+    return 1;
   }
+  return (unsigned int)points;
+}
+
+unsigned int secondsPerPlotColumn(float hours) {
+  unsigned int points = getPlotDataPoints();
+  unsigned long seconds = (unsigned long)(hours * 3600.0f + 0.5f);
+  unsigned int interval = (unsigned int)((seconds + points - 1) / points);
+  if (interval < MIN_LOG_INTERV_SEC) {
+    interval = MIN_LOG_INTERV_SEC;
+  }
+  return interval;
+}
+
+void initAdaptiveLogIntervals() {
+  unsigned int plotHoursCount = sizeof(plotHours) / sizeof(plotHours[0]);
+  float shortestHours = plotHours[0];
+
+  for (unsigned int i = 0; i < plotHoursCount; i++) {
+    if (plotHours[i] < shortestHours) {
+      shortestHours = plotHours[i];
+    }
+    plotRangeIntervalsSec[i] = secondsPerPlotColumn(plotHours[i]);
+  }
+
+  effectiveLogIntervSec = secondsPerPlotColumn(shortestHours);
+  Serial.println("Adaptive RAM log interval: " + String(effectiveLogIntervSec) + "s");
+}
+
+unsigned int requiredIntervalForAge(unsigned long ageSec) {
+  unsigned int plotHoursCount = sizeof(plotHours) / sizeof(plotHours[0]);
+
+  for (unsigned int i = 0; i < plotHoursCount; i++) {
+    unsigned long windowSec = (unsigned long)(plotHours[i] * 3600.0f);
+    if (ageSec <= windowSec) {
+      return plotRangeIntervalsSec[i];
+    }
+  }
+
+  return plotRangeIntervalsSec[plotHoursCount - 1];
+}
+
+void mergeLogMetric(float &dstAvg, float &dstMin, float &dstMax, uint16_t &dstSamples, bool &dstOk,
+                    float srcAvg, float srcMin, float srcMax, uint16_t srcSamples, bool srcOk) {
+  if (!srcOk || srcSamples == 0) {
+    return;
+  }
+
+  if (!dstOk || dstSamples == 0) {
+    dstAvg = srcAvg;
+    dstMin = srcMin;
+    dstMax = srcMax;
+    dstSamples = srcSamples;
+    dstOk = true;
+    return;
+  }
+
+  unsigned long totalSamples = (unsigned long)dstSamples + (unsigned long)srcSamples;
+  if (totalSamples == 0) {
+    return;
+  }
+
+  dstAvg = (dstAvg * (float)dstSamples + srcAvg * (float)srcSamples) / (float)totalSamples;
+  dstMin = min(dstMin, srcMin);
+  dstMax = max(dstMax, srcMax);
+  if (totalSamples > 65535UL) {
+    dstSamples = 65535;
+  } else {
+    dstSamples = (uint16_t)totalSamples;
+  }
+  dstOk = true;
+}
+
+String formatRetentionText(unsigned long long seconds) {
+  unsigned long long minutes = seconds / 60ULL;
+  unsigned long long hours = minutes / 60ULL;
+  unsigned long long days = hours / 24ULL;
+  unsigned long long years = days / 365ULL;
+
+  if (years > 0) {
+    return String((unsigned long)years) + "y " + String((unsigned long)(days % 365ULL)) + "d";
+  }
+  if (days > 0) {
+    return String((unsigned long)days) + "d " + String((unsigned long)(hours % 24ULL)) + "h";
+  }
+  if (hours > 0) {
+    return String((unsigned long)hours) + "h " + String((unsigned long)(minutes % 60ULL)) + "m";
+  }
+  return String((unsigned long)minutes) + "m";
+}
+
+unsigned long long estimateSmartRetentionSeconds(unsigned int capacity) {
+  if (capacity == 0) {
+    return 0;
+  }
+
+  unsigned long long remainingEntries = (unsigned long long)capacity;
+  unsigned long long coveredSeconds = 0;
+  unsigned long long prevWindowSec = 0;
+  unsigned int plotHoursCount = sizeof(plotHours) / sizeof(plotHours[0]);
+
+  for (unsigned int i = 0; i < plotHoursCount; i++) {
+    unsigned long long windowSec = (unsigned long long)(plotHours[i] * 3600.0f + 0.5f);
+    unsigned long long bucketSec = windowSec - prevWindowSec;
+    unsigned int intervalSec = plotRangeIntervalsSec[i];
+    if (intervalSec == 0) {
+      intervalSec = secondsPerPlotColumn(plotHours[i]);
+    }
+
+    unsigned long long neededEntries = (bucketSec + (unsigned long long)intervalSec - 1ULL) / (unsigned long long)intervalSec;
+
+    if (remainingEntries >= neededEntries) {
+      coveredSeconds = windowSec;
+      remainingEntries -= neededEntries;
+      prevWindowSec = windowSec;
+    } else {
+      coveredSeconds = prevWindowSec + remainingEntries * (unsigned long long)intervalSec;
+      remainingEntries = 0;
+      break;
+    }
+  }
+
+  if (remainingEntries > 0) {
+    unsigned int lastInterval = plotRangeIntervalsSec[plotHoursCount - 1];
+    if (lastInterval == 0) {
+      lastInterval = secondsPerPlotColumn(plotHours[plotHoursCount - 1]);
+    }
+    coveredSeconds += remainingEntries * (unsigned long long)lastInterval;
+  }
+
+  return coveredSeconds;
+}
+
+bool compactRamLog(unsigned long nowEpoch) {
+  if (logBuffer == nullptr || logBufferCount < 2 || logBufferCapacity < 2) {
+    return false;
+  }
+
+  unsigned int beforeCount = logBufferCount;
+  size_t usedBytes = (size_t)beforeCount * sizeof(LogEntry);
+  LogEntry *linear = (LogEntry *)malloc(usedBytes);
+  if (linear == nullptr) {
+    return false;
+  }
+
+  for (unsigned int i = 0; i < beforeCount; i++) {
+    unsigned int idx = (logBufferHead + logBufferCapacity - beforeCount + i) % logBufferCapacity;
+    linear[i] = logBuffer[idx];
+  }
+
+  unsigned int keepCount = 0;
+  bool haveLastKept = false;
+  unsigned long lastKeptEpoch = 0;
+
+  for (unsigned int i = 0; i < beforeCount; i++) {
+    const LogEntry &entry = linear[i];
+    bool keep = false;
+
+    if (i == beforeCount - 1) {
+      keep = true;
+    } else if (!haveLastKept) {
+      keep = true;
+    } else if (entry.epoch <= lastKeptEpoch) {
+      keep = true;
+    } else {
+      unsigned long ageSec = (nowEpoch > entry.epoch) ? (nowEpoch - entry.epoch) : 0;
+      unsigned int minSpacing = requiredIntervalForAge(ageSec);
+      keep = (entry.epoch - lastKeptEpoch) >= (unsigned long)minSpacing;
+    }
+
+    if (keep) {
+      linear[keepCount] = entry;
+      keepCount++;
+      haveLastKept = true;
+      lastKeptEpoch = entry.epoch;
+    } else if (keepCount > 0) {
+      mergeLogMetric(linear[keepCount - 1].tempIn, linear[keepCount - 1].tempInMin, linear[keepCount - 1].tempInMax, linear[keepCount - 1].tempInSamples, linear[keepCount - 1].tempInOk,
+                     entry.tempIn, entry.tempInMin, entry.tempInMax, entry.tempInSamples, entry.tempInOk);
+      mergeLogMetric(linear[keepCount - 1].tempOut, linear[keepCount - 1].tempOutMin, linear[keepCount - 1].tempOutMax, linear[keepCount - 1].tempOutSamples, linear[keepCount - 1].tempOutOk,
+                     entry.tempOut, entry.tempOutMin, entry.tempOutMax, entry.tempOutSamples, entry.tempOutOk);
+      mergeLogMetric(linear[keepCount - 1].tempPcb, linear[keepCount - 1].tempPcbMin, linear[keepCount - 1].tempPcbMax, linear[keepCount - 1].tempPcbSamples, linear[keepCount - 1].tempPcbOk,
+                     entry.tempPcb, entry.tempPcbMin, entry.tempPcbMax, entry.tempPcbSamples, entry.tempPcbOk);
+      mergeLogMetric(linear[keepCount - 1].hum, linear[keepCount - 1].humMin, linear[keepCount - 1].humMax, linear[keepCount - 1].humSamples, linear[keepCount - 1].humOk,
+                     entry.hum, entry.humMin, entry.humMax, entry.humSamples, entry.humOk);
+      mergeLogMetric(linear[keepCount - 1].pres, linear[keepCount - 1].presMin, linear[keepCount - 1].presMax, linear[keepCount - 1].presSamples, linear[keepCount - 1].presOk,
+                     entry.pres, entry.presMin, entry.presMax, entry.presSamples, entry.presOk);
+      if (entry.epoch > linear[keepCount - 1].epoch) {
+        linear[keepCount - 1].epoch = entry.epoch;
+      }
+      lastKeptEpoch = linear[keepCount - 1].epoch;
+    }
+  }
+
+  if (beforeCount - keepCount < LOG_COMPACT_MIN_SAVINGS && keepCount > 1) {
+    mergeLogMetric(linear[1].tempIn, linear[1].tempInMin, linear[1].tempInMax, linear[1].tempInSamples, linear[1].tempInOk,
+                   linear[0].tempIn, linear[0].tempInMin, linear[0].tempInMax, linear[0].tempInSamples, linear[0].tempInOk);
+    mergeLogMetric(linear[1].tempOut, linear[1].tempOutMin, linear[1].tempOutMax, linear[1].tempOutSamples, linear[1].tempOutOk,
+                   linear[0].tempOut, linear[0].tempOutMin, linear[0].tempOutMax, linear[0].tempOutSamples, linear[0].tempOutOk);
+    mergeLogMetric(linear[1].tempPcb, linear[1].tempPcbMin, linear[1].tempPcbMax, linear[1].tempPcbSamples, linear[1].tempPcbOk,
+                   linear[0].tempPcb, linear[0].tempPcbMin, linear[0].tempPcbMax, linear[0].tempPcbSamples, linear[0].tempPcbOk);
+    mergeLogMetric(linear[1].hum, linear[1].humMin, linear[1].humMax, linear[1].humSamples, linear[1].humOk,
+                   linear[0].hum, linear[0].humMin, linear[0].humMax, linear[0].humSamples, linear[0].humOk);
+    mergeLogMetric(linear[1].pres, linear[1].presMin, linear[1].presMax, linear[1].presSamples, linear[1].presOk,
+                   linear[0].pres, linear[0].presMin, linear[0].presMax, linear[0].presSamples, linear[0].presOk);
+    if (linear[0].epoch > linear[1].epoch) {
+      linear[1].epoch = linear[0].epoch;
+    }
+    memmove(linear, linear + 1, (size_t)(keepCount - 1) * sizeof(LogEntry));
+    keepCount--;
+  }
+
+  memset(logBuffer, 0, (size_t)logBufferCapacity * sizeof(LogEntry));
+  for (unsigned int i = 0; i < keepCount; i++) {
+    logBuffer[i] = linear[i];
+  }
+  logBufferCount = keepCount;
+  logBufferHead = keepCount % logBufferCapacity;
+
+  free(linear);
+
+  if (beforeCount > keepCount) {
+    Serial.println("RAM log compacted: " + String(beforeCount) + " -> " + String(keepCount));
+    return true;
+  }
+  return false;
+}
+
+bool initLogBuffer() {
+  size_t freeHeap = ESP.getFreeHeap();
+  size_t maxAllocHeap = ESP.getMaxAllocHeap();
+  size_t safeBytes = min(freeHeap, maxAllocHeap);
+
+  if (safeBytes <= LOG_BUFFER_RESERVE_BYTES) {
+    displayMessage("RAM log alloc failed");
+    return false;
+  }
+
+  safeBytes -= LOG_BUFFER_RESERVE_BYTES;
+  unsigned int targetEntries = safeBytes / sizeof(LogEntry);
+
+  if (targetEntries < LOG_BUFFER_MIN_ENTRIES) {
+    targetEntries = LOG_BUFFER_MIN_ENTRIES;
+  }
+
+  while (targetEntries >= LOG_BUFFER_MIN_ENTRIES) {
+    logBuffer = (LogEntry *)malloc((size_t)targetEntries * sizeof(LogEntry));
+    if (logBuffer != nullptr) {
+      memset(logBuffer, 0, (size_t)targetEntries * sizeof(LogEntry));
+      logBufferCapacity = targetEntries;
+      logBufferHead = 0;
+      logBufferCount = 0;
+      unsigned long long smartRetentionSec = estimateSmartRetentionSeconds(logBufferCapacity);
+      unsigned long long longestPlotRangeSec = (unsigned long long)(plotHours[(sizeof(plotHours) / sizeof(plotHours[0])) - 1] * 3600.0f + 0.5f);
+      String retentionText = formatRetentionText(smartRetentionSec);
+      displayMessage("Log every " + String(effectiveLogIntervSec) + "s");
+      displayMessage("RAM log: " + String(logBufferCapacity) + " entries");
+      displayMessage("Smart keeps " + retentionText);
+      displayMessage((smartRetentionSec >= longestPlotRangeSec) ? "All plot ranges OK" : "Longest range partial");
+      return true;
+    }
+    targetEntries = (targetEntries * 3) / 4;
+  }
+
+  displayMessage("RAM log alloc failed");
+  return false;
+}
+
+void logData() {
+  if (logBuffer == nullptr || logBufferCapacity == 0) {
+    return;
+  }
+
+  if (logBufferCount >= logBufferCapacity) {
+    unsigned long nowEpoch;
+    if (timeOk && timeClient.isTimeSet()) {
+      nowEpoch = timeClient.getEpochTime();
+    } else {
+      nowEpoch = millis() / 1000;
+    }
+    compactRamLog(nowEpoch);
+  }
+
+  if (logBufferCount >= logBufferCapacity) {
+    logBufferCount = logBufferCapacity - 1;
+  }
+
+  LogEntry &entry = logBuffer[logBufferHead];
+
+  if (timeOk && timeClient.isTimeSet()) {
+    entry.epoch = timeClient.getEpochTime();
+  } else {
+    entry.epoch = millis() / 1000;
+  }
+
+  entry.tempIn = temperature_in;
+  entry.tempOut = temperature_out;
+  entry.tempPcb = temperature_pcb;
+  entry.hum = humidity_rel;
+  entry.pres = pressure;
+
+  entry.tempInMin = temperature_in;
+  entry.tempInMax = temperature_in;
+  entry.tempOutMin = temperature_out;
+  entry.tempOutMax = temperature_out;
+  entry.tempPcbMin = temperature_pcb;
+  entry.tempPcbMax = temperature_pcb;
+  entry.humMin = humidity_rel;
+  entry.humMax = humidity_rel;
+  entry.presMin = pressure;
+  entry.presMax = pressure;
+
+  entry.tempInOk = temperature_in_ok;
+  entry.tempOutOk = temperature_out_ok;
+  entry.tempPcbOk = temperature_pcb_ok;
+  entry.humOk = humidity_rel_ok;
+  entry.presOk = pressure_ok;
+
+  entry.tempInSamples = temperature_in_ok ? 1 : 0;
+  entry.tempOutSamples = temperature_out_ok ? 1 : 0;
+  entry.tempPcbSamples = temperature_pcb_ok ? 1 : 0;
+  entry.humSamples = humidity_rel_ok ? 1 : 0;
+  entry.presSamples = pressure_ok ? 1 : 0;
+
+  logBufferHead = (logBufferHead + 1) % logBufferCapacity;
+  if (logBufferCount < logBufferCapacity) {
+    logBufferCount++;
+  }
+
+  Serial.println("RAM log write: epoch=" + String(entry.epoch)
+                 + " used=" + String(logBufferCount)
+                 + "/" + String(logBufferCapacity)
+                 + " interval=" + String(effectiveLogIntervSec) + "s");
+
+  newLogData = true;
 }
 #endif
 
-#if USE_SD
-void readMotorPos() {
-  File file = SD.open(DIAL_POS_FILE, FILE_READ);
-  if (file) {
-    String lineOne = file.readStringUntil('\n');
-    //displayMessage("Line one: " + lineOne);
-    String lineTwo = file.readStringUntil('\n');
-    lineOne.trim();
-    lineTwo.trim();
-    storedDialPosTop = (unsigned int)lineOne.toInt();
-    storedDialPosBottom = (unsigned int)lineTwo.toInt();
-  } else {
-    displayMessage("Error reading " + String(DIAL_POS_FILE));
+void storeMotorPos() {
+  motorPosPrefs.begin("motorpos", false);
+  unsigned int currentTop = motor1->getTargetPosition();
+  unsigned int currentBottom = motor2->getTargetPosition();
+
+  bool hasTop = motorPosPrefs.isKey("top");
+  bool hasBottom = motorPosPrefs.isKey("bottom");
+
+  if (!hasTop || motorPosPrefs.getUInt("top", 0) != currentTop) {
+    motorPosPrefs.putUInt("top", currentTop);
   }
+  if (!hasBottom || motorPosPrefs.getUInt("bottom", 0) != currentBottom) {
+    motorPosPrefs.putUInt("bottom", currentBottom);
+  }
+  motorPosPrefs.end();
 }
-#endif
+
+void readMotorPos() {
+  motorPosPrefs.begin("motorpos", true);  // read-only
+  storedDialPosTop = motorPosPrefs.getUInt("top", 0);
+  storedDialPosBottom = motorPosPrefs.getUInt("bottom", 0);
+  motorPosPrefs.end();
+}
 
 float map_float(float x, float in_min, float in_max, float out_min, float out_max) {
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
@@ -1331,7 +1940,7 @@ void displayScreensaver() {
   // Calculate text width
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
-  screensaverText = String(temperature_out, 1) + " C";
+  screensaverText = "in:" + String(temperature_in, 1) + " C";
   marqueeTextWidth = screensaverText.length() * charWidth * 2; // Adjust for text size 2
 
   int minX = 0;

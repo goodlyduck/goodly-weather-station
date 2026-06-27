@@ -32,7 +32,140 @@ void plotAxes(float hours, const char *title) {
   display.display();
 }
 
+void initPlotBuffers(int maxDataPoints, float data[], float dataMax[], float dataMin[], unsigned int dataCount[]) {
+  for (int i = 0; i < maxDataPoints; i++) {
+    data[i] = INVALID_NUMBER;
+    dataMax[i] = INVALID_NUMBER;
+    dataMin[i] = INVALID_NUMBER;
+    dataCount[i] = 0;
+  }
+}
+
+void addPlotValue(unsigned int dataIdx, float value, float data[], float dataMax[], float dataMin[], unsigned int dataCount[]) {
+  if (dataCount[dataIdx] == 0) {
+    data[dataIdx] = 0;
+    dataMax[dataIdx] = value;
+    dataMin[dataIdx] = value;
+  }
+  dataCount[dataIdx]++;
+  data[dataIdx] = data[dataIdx] + value;
+  dataMax[dataIdx] = max(dataMax[dataIdx], value);
+  dataMin[dataIdx] = min(dataMin[dataIdx], value);
+}
+
+void addPlotAggregate(unsigned int dataIdx, float avgValue, float minValue, float maxValue, unsigned int samples,
+                      float data[], float dataMax[], float dataMin[], unsigned int dataCount[]) {
+  if (samples == 0) {
+    return;
+  }
+
+  if (dataCount[dataIdx] == 0) {
+    data[dataIdx] = 0;
+    dataMax[dataIdx] = maxValue;
+    dataMin[dataIdx] = minValue;
+  }
+
+  dataCount[dataIdx] += samples;
+  data[dataIdx] = data[dataIdx] + avgValue * (float)samples;
+  dataMax[dataIdx] = max(dataMax[dataIdx], maxValue);
+  dataMin[dataIdx] = min(dataMin[dataIdx], minValue);
+}
+
+bool finalizeAndRenderPlot(int maxDataPoints, float data[], float dataMax[], float dataMin[], unsigned int dataCount[]) {
+  // Calculate average of plot points with more than one data point
+  for (int i = 0; i < maxDataPoints; i++) {
+    if (dataCount[i] > 1) {
+      data[i] = data[i] / dataCount[i];
+    }
+  }
+
+  // Find the minimum and maximum data values
+  float minData = INVALID_NUMBER;
+  float maxData = INVALID_NUMBER;
+
+  for (int i = 0; i < maxDataPoints; i++) {
+    if (plotUseRange) {
+      if (minData == INVALID_NUMBER && dataCount[i] > 0) {
+        minData = dataMin[i];
+      }
+      if (maxData == INVALID_NUMBER && dataCount[i] > 0) {
+        maxData = dataMin[i];
+      }
+      if (dataMin[i] < minData && dataCount[i] > 0) {
+        minData = dataMin[i];
+      }
+      if (dataMax[i] > maxData && dataCount[i] > 0) {
+        maxData = dataMax[i];
+      }
+    } else {
+      if (minData == INVALID_NUMBER && dataCount[i] > 0) {
+        minData = data[i];
+      }
+      if (maxData == INVALID_NUMBER && dataCount[i] > 0) {
+        maxData = data[i];
+      }
+      if (data[i] < minData && dataCount[i] > 0) {
+        minData = data[i];
+      }
+      if (data[i] > maxData && dataCount[i] > 0) {
+        maxData = data[i];
+      }
+    }
+  }
+
+  if (minData == INVALID_NUMBER || maxData == INVALID_NUMBER) {
+    return false;
+  }
+
+  // Plot the data
+  display.setTextColor(SSD1306_WHITE);
+
+  // Print min and max values to the left of the y-axis
+  display.setCursor(0, SCREEN_MARGIN_TOP);
+  if (maxData > 100) {
+    display.print(maxData, 0);
+  } else {
+    display.print(maxData, 1);
+  }
+  display.setCursor(0, SCREEN_HEIGHT - charHeight);
+  if (minData > 100) {
+    display.print(minData, 0);
+  } else {
+    display.print(minData, 1);
+  }
+
+  // Clear plot area
+  display.fillRect(yLabelWidth + 3, 0, maxDataPoints, SCREEN_HEIGHT - 2, SSD1306_BLACK);
+
+  // Plot data
+  for (int i = 0; i < maxDataPoints; i++) {
+    if (dataCount[i] > 0) {
+      int x = yLabelWidth + 3 + i;
+      if (plotUseRange) {
+        int y1 = map_float(dataMin[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);
+        int y2 = map_float(dataMax[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);
+        display.drawLine(x, y1, x, y2, SSD1306_WHITE);
+      } else {
+        int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);
+        display.drawPixel(x, y, SSD1306_WHITE);
+      }
+    }
+  }
+
+  display.display();
+  return true;
+}
+
 void plotData(const char *var, float hours, String &currentDate, String &currentTime, const char *title) {
+  // Plot area is width - label - line
+  const int maxDataPoints = SCREEN_WIDTH - yLabelWidth - 1;
+  float data[maxDataPoints];
+  float dataMax[maxDataPoints];
+  float dataMin[maxDataPoints];
+  unsigned int dataCount[maxDataPoints];
+
+  initPlotBuffers(maxDataPoints, data, dataMax, dataMin, dataCount);
+
 #if USE_SD
   File file = SD.open(DATA_LOG_FILE, FILE_READ);
 
@@ -42,19 +175,6 @@ void plotData(const char *var, float hours, String &currentDate, String &current
     return;
   }
 
-  // Plot area is width - label - line
-  const int maxDataPoints = SCREEN_WIDTH - yLabelWidth - 1;
-  float data[maxDataPoints];
-  float dataMax[maxDataPoints];
-  float dataMin[maxDataPoints];
-  for (int i = 0; i < maxDataPoints; i++) {
-    data[i] = INVALID_NUMBER;
-    dataMax[i] = INVALID_NUMBER;
-    dataMin[i] = INVALID_NUMBER;
-  }
-  //unsigned int dataCount = 0;
-  unsigned int dataTimeIdx = 0;
-  unsigned int dataCount[maxDataPoints] = { 0 };
   int varIndex = -1;
 
   DateTime now = DateTime(currentDate.substring(0, 4).toInt(),
@@ -132,16 +252,7 @@ void plotData(const char *var, float hours, String &currentDate, String &current
             // Map log points to current time scale
             unsigned int dataTimeIdx = map(logTime_epoch, startTime_epoch, now_epoch, 0, maxDataPoints - 1);
 
-            // Add data value to plot time index
-            if (dataCount[dataTimeIdx] == 0) {  // No data added to this time point yet
-              data[dataTimeIdx] = 0;            // Replace INVALID_NUMBER with 0
-              dataMax[dataTimeIdx] = value;
-              dataMin[dataTimeIdx] = value;
-            }
-            dataCount[dataTimeIdx]++;
-            data[dataTimeIdx] = data[dataTimeIdx] + value;
-            dataMax[dataTimeIdx] = max(dataMax[dataTimeIdx], value);
-            dataMin[dataTimeIdx] = min(dataMin[dataTimeIdx], value);
+            addPlotValue(dataTimeIdx, value, data, dataMax, dataMin, dataCount);
           }
         }
         commaCount++;
@@ -151,93 +262,103 @@ void plotData(const char *var, float hours, String &currentDate, String &current
   }
 
   file.close();
-
-  // Calculate average of plot points with more than one data point
-  for (int i = 0; i < maxDataPoints; i++) {
-    if (dataCount[i] > 1) {
-      data[i] = data[i] / dataCount[i];
-    }
-  }
-
-  // Find the minimum and maximum data values
-  float minData = INVALID_NUMBER;
-  float maxData = INVALID_NUMBER;
-
-  for (int i = 0; i < maxDataPoints; i++) {
-    if (plotUseRange) {
-      if (minData == INVALID_NUMBER && dataCount[i] > 0) {
-        minData = dataMin[i];
-      }
-      if (maxData == INVALID_NUMBER && dataCount[i] > 0) {
-        maxData = dataMin[i];
-      }
-      if (dataMin[i] < minData && dataCount[i] > 0) {
-        minData = dataMin[i];
-      }
-      if (dataMax[i] > maxData && dataCount[i] > 0) {
-        maxData = dataMax[i];
-      }
-    } else {
-      if (minData == INVALID_NUMBER && dataCount[i] > 0) {
-        minData = data[i];
-      }
-      if (maxData == INVALID_NUMBER && dataCount[i] > 0) {
-        maxData = data[i];
-      }
-      if (data[i] < minData && dataCount[i] > 0) {
-        minData = data[i];
-      }
-      if (data[i] > maxData && dataCount[i] > 0) {
-        maxData = data[i];
-      }
-    }
-  }
-
-  // Plot the data
-  //display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-
-  // Print min and max values to the left of the y-axis
-  display.setCursor(0, SCREEN_MARGIN_TOP);
-  if (maxData > 100) {
-    display.print(maxData, 0);
-  } else {
-    display.print(maxData, 1);
-  }
-  display.setCursor(0, SCREEN_HEIGHT - charHeight);
-  if (minData > 100) {
-    display.print(minData, 0);
-  } else {
-    display.print(minData, 1);
-  }
-
-  // Clear plot area
-  display.fillRect(yLabelWidth + 3, 0, maxDataPoints, SCREEN_HEIGHT - 2, SSD1306_BLACK);
-
-  // Plot data
-  for (int i = 0; i < maxDataPoints; i++) {
-    if (dataCount[i] > 0) {
-      int x = yLabelWidth + 3 + i;
-      if (plotUseRange) {
-        int y1 = map_float(dataMin[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);
-        int y2 = map_float(dataMax[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);
-        display.drawLine(x, y1, x, y2, SSD1306_WHITE);
-      } else {
-        int y = map_float(data[i], minData, maxData, SCREEN_HEIGHT - 2, SCREEN_MARGIN_TOP);  // Reverse y-axis mapping
-        display.drawPixel(x, y, SSD1306_WHITE);
-      }
-    }
-  }
-
-  display.display();
 #else
-  displayMessage("SD card disabled");
+  if (logBufferCount == 0) {
+    displayMessage("No log data");
+    return;
+  }
+
+  unsigned long now_epoch;
+  if (timeOk && timeClient.isTimeSet()) {
+    now_epoch = timeClient.getEpochTime();
+  } else {
+    now_epoch = millis() / 1000;
+  }
+  unsigned long startTime_epoch = now_epoch - (unsigned long)(hours * 3600.0);
+
+  if (logBufferCapacity == 0) {
+    displayMessage("No log buffer");
+    return;
+  }
+
+  for (unsigned int i = 0; i < logBufferCount; i++) {
+    unsigned int idx = (logBufferHead + logBufferCapacity - logBufferCount + i) % logBufferCapacity;
+    const LogEntry &entry = logBuffer[idx];
+
+    if (entry.epoch < startTime_epoch || entry.epoch > now_epoch) {
+      continue;
+    }
+
+    float value = INVALID_NUMBER;
+    float minValue = INVALID_NUMBER;
+    float maxValue = INVALID_NUMBER;
+    unsigned int samples = 0;
+    bool valueOk = false;
+
+    if (strcmp(var, "TempIn") == 0) {
+      value = entry.tempIn;
+      minValue = entry.tempInMin;
+      maxValue = entry.tempInMax;
+      samples = entry.tempInSamples;
+      valueOk = entry.tempInOk && entry.tempInSamples > 0;
+    } else if (strcmp(var, "TempOut") == 0) {
+      value = entry.tempOut;
+      minValue = entry.tempOutMin;
+      maxValue = entry.tempOutMax;
+      samples = entry.tempOutSamples;
+      valueOk = entry.tempOutOk && entry.tempOutSamples > 0;
+    } else if (strcmp(var, "PressureIn") == 0) {
+      value = entry.pres;
+      minValue = entry.presMin;
+      maxValue = entry.presMax;
+      samples = entry.presSamples;
+      valueOk = entry.presOk && entry.presSamples > 0;
+    } else if (strcmp(var, "HumidityIn") == 0) {
+      value = entry.hum;
+      minValue = entry.humMin;
+      maxValue = entry.humMax;
+      samples = entry.humSamples;
+      valueOk = entry.humOk && entry.humSamples > 0;
+    } else if (strcmp(var, "TempPcb") == 0) {
+      value = entry.tempPcb;
+      minValue = entry.tempPcbMin;
+      maxValue = entry.tempPcbMax;
+      samples = entry.tempPcbSamples;
+      valueOk = entry.tempPcbOk && entry.tempPcbSamples > 0;
+    }
+
+    if (!valueOk && strcmp(var, "TempIn") != 0 && strcmp(var, "TempOut") != 0 && strcmp(var, "PressureIn") != 0 && strcmp(var, "HumidityIn") != 0 && strcmp(var, "TempPcb") != 0) {
+      Serial.print("Variable ");
+      Serial.print(var);
+      Serial.println(" not found in RAM log.");
+      return;
+    }
+
+    if (!valueOk) {
+      continue;
+    }
+
+    unsigned int dataTimeIdx = maxDataPoints - 1;
+    if (now_epoch > startTime_epoch) {
+      dataTimeIdx = map(entry.epoch, startTime_epoch, now_epoch, 0, maxDataPoints - 1);
+      if (dataTimeIdx >= (unsigned int)maxDataPoints) {
+        dataTimeIdx = maxDataPoints - 1;
+      }
+    }
+
+    addPlotAggregate(dataTimeIdx, value, minValue, maxValue, samples, data, dataMax, dataMin, dataCount);
+  }
 #endif
+
+  if (!finalizeAndRenderPlot(maxDataPoints, data, dataMax, dataMin, dataCount)) {
+    displayMessage("No valid log data");
+  }
 }
 
 void incPlotTime() {
   if (plotHoursIdx < sizeof(plotHours) / sizeof(plotHours[0]) - 1) {
     plotHoursIdx++;
+    savePlotSettings();
     //displayMessageSignHours(plotHours[plotHoursIdx]);
   }
 }
@@ -245,6 +366,7 @@ void incPlotTime() {
 void decPlotTime() {
   if (plotHoursIdx > 0) {
     plotHoursIdx--;
+    savePlotSettings();
     //displayMessageSignHours(plotHours[plotHoursIdx]);
   }
 }
