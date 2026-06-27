@@ -18,6 +18,8 @@
 #include <OneWire.h>
 #endif
 #include <PubSubClient.h> // MQTT library
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 //#include <time.h>
 #include <DHT22.h>
 #include <RTClib.h>
@@ -135,6 +137,11 @@ DialState dialStateBottom = DialState::OFF;
 #define LOG_COMPACT_MIN_SAVINGS 8
 #endif
 
+#if !USE_DS18B20
+#define SMHI_STATION_ID 71420  // Göteborg A - change to nearest station
+#define SMHI_FETCH_INTERV_SEC 3600
+#endif
+
 #define TEMP_PLAUS_MIN -60
 #define TEMP_PLAUS_MAX 60
 #define PRES_PLAUS_MIN 800
@@ -199,6 +206,11 @@ bool temperature_out_ok = false;
 bool temperature_pcb_ok = false;
 bool pressure_ok = false;
 bool humidity_rel_ok = false;
+#if !USE_DS18B20
+float smhi_temperature = 0.0f;
+bool smhi_temperature_ok = false;
+unsigned long lastSMHIFetchMillis = 0;
+#endif
 unsigned int currentMessageLine = 0;
 String messages[DISPLAY_LINES];
 unsigned int storedDialPosTop;
@@ -352,6 +364,7 @@ bool useDisplayOff = false;
 unsigned long lastMarqueeUpdate = 0;
 unsigned int marqueeSpeed = 5000; // ms between marquee updates
 String screensaverText = "Goodly Weather Station";
+bool screensaverShowOutdoor = false;
 int marqueeX = 0;
 int marqueeY = 0;
 int marqueeDir = 1;
@@ -397,6 +410,10 @@ void setup() {
   initLogBuffer();
 #endif
   readSensors();
+#if !USE_DS18B20
+  fetchSMHITemperature();
+  lastSMHIFetchMillis = millis();
+#endif
   arbitrateSensorReadings();
   getTimeStamp();
   logData();  // Log initial boot data point so plots aren't empty
@@ -629,6 +646,13 @@ void loop() {
     displayOnPrev = displayOn;
   }
 
+#if !USE_DS18B20
+  if (WiFi.status() == WL_CONNECTED && millis() - lastSMHIFetchMillis > SMHI_FETCH_INTERV_SEC * 1000UL) {
+    fetchSMHITemperature();
+    lastSMHIFetchMillis = millis();
+  }
+#endif
+
   if ((millis() - lastSensorReadMillis > SENSOR_READ_INTERV_SEC * 1000)
       && (millis() - lastInputMillis > SENSOR_READ_INPUT_DLY_SEC * 1000)) {
     readSensors();
@@ -786,6 +810,36 @@ bool saveWiFiCredentialsToEEPROM(const String &ssid, const String &password) {
 
   if (!EEPROM.begin(EEPROM_SIZE)) {
     return false;
+  }
+
+  bool sameAsStored = false;
+  uint16_t magic = (uint16_t)EEPROM.read(WIFI_EEPROM_MAGIC_ADDR)
+                   | ((uint16_t)EEPROM.read(WIFI_EEPROM_MAGIC_ADDR + 1) << 8);
+  if (magic == WIFI_EEPROM_MAGIC) {
+    uint8_t storedSsidLen = EEPROM.read(WIFI_EEPROM_SSID_LEN_ADDR);
+    uint8_t storedPassLen = EEPROM.read(WIFI_EEPROM_PASS_LEN_ADDR);
+    if (storedSsidLen == (uint8_t)trimmedSsid.length() && storedPassLen == (uint8_t)trimmedPassword.length()) {
+      sameAsStored = true;
+      for (int i = 0; i < storedSsidLen; i++) {
+        if ((char)EEPROM.read(WIFI_EEPROM_DATA_ADDR + i) != trimmedSsid[i]) {
+          sameAsStored = false;
+          break;
+        }
+      }
+      if (sameAsStored) {
+        for (int i = 0; i < storedPassLen; i++) {
+          if ((char)EEPROM.read(WIFI_EEPROM_DATA_ADDR + WIFI_MAX_SSID_LEN + i) != trimmedPassword[i]) {
+            sameAsStored = false;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (sameAsStored) {
+    EEPROM.end();
+    return true;
   }
 
   EEPROM.write(WIFI_EEPROM_MAGIC_ADDR, WIFI_EEPROM_MAGIC & 0xFF);
@@ -998,22 +1052,7 @@ void initWifi() {
         if (selectedPassword.length() > WIFI_MAX_PASS_LEN) {
           selectedPassword = selectedPassword.substring(0, WIFI_MAX_PASS_LEN);
         }
-
-        EEPROM.write(WIFI_EEPROM_MAGIC_ADDR, WIFI_EEPROM_MAGIC & 0xFF);
-        EEPROM.write(WIFI_EEPROM_MAGIC_ADDR + 1, (WIFI_EEPROM_MAGIC >> 8) & 0xFF);
-        EEPROM.write(WIFI_EEPROM_SSID_LEN_ADDR, (uint8_t)selectedSsid.length());
-        EEPROM.write(WIFI_EEPROM_PASS_LEN_ADDR, (uint8_t)selectedPassword.length());
-
-        for (int i = 0; i < WIFI_MAX_SSID_LEN; i++) {
-          char ch = (i < selectedSsid.length()) ? selectedSsid[i] : 0;
-          EEPROM.write(WIFI_EEPROM_DATA_ADDR + i, (uint8_t)ch);
-        }
-        for (int i = 0; i < WIFI_MAX_PASS_LEN; i++) {
-          char ch = (i < selectedPassword.length()) ? selectedPassword[i] : 0;
-          EEPROM.write(WIFI_EEPROM_DATA_ADDR + WIFI_MAX_SSID_LEN + i, (uint8_t)ch);
-        }
-
-        if (EEPROM.commit()) {
+        if (saveWiFiCredentialsToEEPROM(selectedSsid, selectedPassword)) {
           Serial.println("WiFi credentials saved to EEPROM.");
         } else {
           Serial.println("Failed to save WiFi credentials to EEPROM.");
@@ -1124,6 +1163,75 @@ bool isMenuSelection(const char *text) {
   }
 }
 
+#if !USE_DS18B20
+void fetchSMHITemperature() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();  // Public open data, no cert pinning needed
+  client.setTimeout(8000);
+
+  HTTPClient https;
+  String url = "https://opendata-download-metobs.smhi.se/api/version/latest/parameter/1/station/"
+               + String(SMHI_STATION_ID) + "/period/latest-hour/data.json";
+
+  if (!https.begin(client, url)) {
+    Serial.println("[SMHI] Failed to begin HTTPS");
+    return;
+  }
+
+  https.setTimeout(8000);
+  int httpCode = https.GET();
+
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.println("[SMHI] HTTP error: " + String(httpCode));
+    https.end();
+    return;
+  }
+
+  String body = https.getString();
+  https.end();
+
+  // Parse temperature from: "value":[{"date":...,"value":"21.5","quality":"G"}]
+  int arrayStart = body.indexOf("\"value\":[");
+  if (arrayStart < 0) {
+    Serial.println("[SMHI] No value array in response");
+    smhi_temperature_ok = false;
+    return;
+  }
+
+  // Find the "value":"..." key inside the array element
+  int valueStart = body.indexOf("\"value\":\"", arrayStart + 9);
+  if (valueStart < 0) {
+    Serial.println("[SMHI] No value key in array");
+    smhi_temperature_ok = false;
+    return;
+  }
+
+  valueStart += 9;  // skip past "value":"
+  int valueEnd = body.indexOf("\"", valueStart);
+  if (valueEnd <= valueStart) {
+    Serial.println("[SMHI] Could not delimit temperature string");
+    smhi_temperature_ok = false;
+    return;
+  }
+
+  String tempStr = body.substring(valueStart, valueEnd);
+  float temp = tempStr.toFloat();
+
+  if (temp > TEMP_PLAUS_MIN && temp < TEMP_PLAUS_MAX) {
+    smhi_temperature = temp;
+    smhi_temperature_ok = true;
+    Serial.println("[SMHI] Outdoor temp: " + String(smhi_temperature, 1) + " C");
+  } else {
+    smhi_temperature_ok = false;
+    Serial.println("[SMHI] Value out of plausible range: " + tempStr);
+  }
+}
+#endif
+
 void arbitrateSensorReadings() {
   // Indoor temp
   if (dht_temperature > TEMP_PLAUS_MIN && dht_temperature < TEMP_PLAUS_MAX && dht_temperature_ok) {
@@ -1144,7 +1252,11 @@ void arbitrateSensorReadings() {
     temperature_out_array[avgSamplesTempOut - 1] = INVALID_NUMBER;
   }
 #else
-  temperature_out_array[avgSamplesTempOut - 1] = INVALID_NUMBER;
+  if (smhi_temperature_ok && smhi_temperature > TEMP_PLAUS_MIN && smhi_temperature < TEMP_PLAUS_MAX) {
+    temperature_out_array[avgSamplesTempOut - 1] = smhi_temperature;
+  } else {
+    temperature_out_array[avgSamplesTempOut - 1] = INVALID_NUMBER;
+  }
 #endif
   int avgSamples = 0;
   float sum = 0;
@@ -1317,6 +1429,9 @@ void setDisplayOn() {
 void setDisplayState(DisplayState newState) {
   displayStatePrev = displayState;
   displayState = newState;
+  if (newState == DisplayState::SCREENSAVER && displayStatePrev != DisplayState::SCREENSAVER) {
+    screensaverShowOutdoor = false;
+  }
 }
 
 void readBmp() {
@@ -1408,11 +1523,17 @@ void displaySummary() {
   display.print(temperature_in);
   display.println(" C");
 
-#if USE_DS18B20
-  display.print("Temp out: ");
-  display.print(temperature_out);
-  display.println(" C");
+  if (temperature_out_ok) {
+    display.print("Temp out: ");
+    display.print(temperature_out, 1);
+#if !USE_DS18B20
+    display.println(" C (S)");
+#else
+    display.println(" C");
 #endif
+  } else {
+    display.print("\n");
+  }
 
   display.print("Pressure: ");
   display.print(pressure);
@@ -1421,10 +1542,6 @@ void displaySummary() {
   display.print("Humidity: ");
   display.print(humidity_rel);
   display.println(" %");
-
-#if !USE_DS18B20
-  display.print("\n");
-#endif
 
   display.println(dateStamp + " " + timeStamp);
 
@@ -1940,7 +2057,24 @@ void displayScreensaver() {
   // Calculate text width
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
-  screensaverText = "in:" + String(temperature_in, 1) + " C";
+  bool indoorValid = temperature_in_ok && temperature_in != INVALID_NUMBER;
+  bool outdoorValid = temperature_out_ok && temperature_out != INVALID_NUMBER;
+
+  if (indoorValid && outdoorValid) {
+    if (screensaverShowOutdoor) {
+      screensaverText = "out " + String(temperature_out, 1) + " C";
+    } else {
+      screensaverText = "in " + String(temperature_in, 1) + " C";
+    }
+    screensaverShowOutdoor = !screensaverShowOutdoor;
+  } else if (outdoorValid) {
+    screensaverText = "out " + String(temperature_out, 1) + " C";
+  } else if (indoorValid) {
+    screensaverText = "in " + String(temperature_in, 1) + " C";
+  } else {
+    screensaverText = "No temp data";
+  }
+
   marqueeTextWidth = screensaverText.length() * charWidth * 2; // Adjust for text size 2
 
   int minX = 0;
