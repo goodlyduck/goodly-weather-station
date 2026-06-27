@@ -344,6 +344,8 @@ bool ds_temperature_ok = false;
 #define DIAL_RANGE_DEG 252  // Limited to front markings plus one more
 #define DIAL_RANGE_STEPS (DIAL_RANGE_DEG * 3)
 #define DIAL_CAL_STEPS 5
+#define DIAL_MIN_MOVE_DEG 3
+#define DIAL_MIN_MOVE_STEPS (DIAL_MIN_MOVE_DEG * 3)
 // SwitecX25 motor1(STEPS,9,7,5,3);
 SwitecX25 *motor1;
 SwitecX25 *motor2;
@@ -1343,29 +1345,37 @@ void zeroStepper(SwitecX25 *motor) {
 
 void updateDialPos(SwitecX25 *motor, DialState state) {
   unsigned int position;
+  bool hasPosition = true;
   switch (state) {
     case DialState::TEMPERATURE_IN:
       position = valToDialPos(temperature_in, DIAL_TEMPERATURE_MIN, DIAL_TEMPERATURE_MAX);
-      motor->setPosition(position);
       break;
     case DialState::TEMPERATURE_OUT:
       position = valToDialPos(temperature_out, DIAL_TEMPERATURE_MIN, DIAL_TEMPERATURE_MAX);
-      motor->setPosition(position);
       break;
     case DialState::PRESSURE:
       position = valToDialPos(pressure, DIAL_PRESSURE_MIN, DIAL_PRESSURE_MAX);
-      motor->setPosition(position);
       break;
     case DialState::HUMIDITY:
       position = valToDialPos(humidity_rel, DIAL_HUMIDITY_MIN, DIAL_HUMIDITY_MAX);
-      motor->setPosition(position);
       break;
     case DialState::CENTER:
       position = valToDialPos(0, -1, 1);
-      motor->setPosition(position);
+      break;
+    case DialState::OFF:
+      hasPosition = false;
       break;
   }
-  storeMotorPos();
+
+  if (!hasPosition) {
+    return;
+  }
+
+  int deltaSteps = abs((int)position - (int)motor->getTargetPosition());
+  if (deltaSteps >= DIAL_MIN_MOVE_STEPS) {
+      motor->setPosition(position);
+      storeMotorPos();
+  }
 }
 
 unsigned int valToDialPos(float val, float min, float max) {
@@ -2079,9 +2089,9 @@ void displayScreensaver() {
 
   int minX = 0;
   int maxX = SCREEN_WIDTH - marqueeTextWidth;
+  marqueeY = random(0, SCREEN_HEIGHT - charHeight * 2); // Update Y every marquee refresh
   // If just started or finished, pick new direction and Y
   if (marqueeX <= minX || marqueeX >= maxX) {
-    marqueeY = random(0, SCREEN_HEIGHT - charHeight * 2); // Adjust for text size 2
     marqueeDir = (random(0, 2) == 0) ? 1 : -1;
     // Clamp direction if at edge
     if (marqueeX <= minX) marqueeDir = 1;
