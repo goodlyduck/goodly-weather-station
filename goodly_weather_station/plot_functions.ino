@@ -33,7 +33,7 @@ void plotAxes(float hours, const char *title) {
 }
 
 void plotData(const char *var, float hours, String &currentDate, String &currentTime, const char *title) {
-
+#if USE_SD
   File file = SD.open(DATA_LOG_FILE, FILE_READ);
 
   if (!file) {
@@ -230,6 +230,9 @@ void plotData(const char *var, float hours, String &currentDate, String &current
   }
 
   display.display();
+#else
+  displayMessage("SD card disabled");
+#endif
 }
 
 void incPlotTime() {

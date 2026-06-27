@@ -4,17 +4,27 @@
 
 //----------------------------------------------------------------------
 
+// FEATURE CONFIGURATION
+#define USE_DS18B20 0  // Set to 1 to enable DS18B20 outdoor temperature sensor
+#define USE_SD 0       // Set to 1 to enable SD card (data logging, plot)
+
+#if USE_SD
 #include <SD.h>
+#endif
 #include <SPI.h>
 #include <Wire.h>
 #include <WiFi.h>
+#if USE_DS18B20
 #include <OneWire.h>
+#endif
 #include <PubSubClient.h> // MQTT library
 //#include <time.h>
 #include <DHT22.h>
 #include <RTClib.h>
+#if USE_DS18B20
 //#include <DS18B20.h>
 #include <DallasTemperature.h>
+#endif
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_Sensor.h>
@@ -88,7 +98,9 @@ DialState dialStateBottom = DialState::OFF;
 #define PIN_ENCODER_DT 4
 #define PIN_ENCODER_SW 3
 
+#if USE_DS18B20
 #define PIN_ONEWIRE 5  // ESP32 GPIO pin due to OneWire.h implementation
+#endif
 
 // USER DEFINES
 #define INVALID_NUMBER -9999
@@ -105,9 +117,11 @@ DialState dialStateBottom = DialState::OFF;
 //#define SENSOR_VALUE_ERROR -999
 #define ENCODER_DEBOUNCE_MILLIS 100
 #define PUSH_DEBOUNCE_MILLIS 100
+#if USE_SD
 #define DATA_LOG_FILE "/datalog.txt"
 #define DATA_LOG_HEADER "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
 #define DIAL_POS_FILE "/dialpos.txt"
+#endif
 
 #define WIFI_FILE "/wifi.txt"
 #define WIFI_RETRY_SEC 10
@@ -174,7 +188,9 @@ unsigned int storedDialPosTop;
 unsigned int storedDialPosBottom;
 float plotHours[] = { 1.0, 12, 24, 24 * 7, 24 * 30, 24 * 365, 24 * 365 * 2, 24 * 365 * 5, 24 * 365 * 10, 24 * 365 * 20, 24 * 365 * 50, 24 * 365 * 100 };
 unsigned int plotHoursIdx = 2;
+#if USE_SD
 bool newLogData;
+#endif
 bool updatePlot;
 bool updateAxes;
 bool newSensorReadings = false;
@@ -243,6 +259,7 @@ bool bmp_temperature_ok = false;
 bool bmp_pressure_ok = false;
 
 // DS18B20 1wire temp sensor
+#if USE_DS18B20
 //DS18B20 ds(PIN_ONEWIRE);
 //uint8_t ds_address[] = { 40, 250, 31, 218, 4, 0, 0, 52 };
 //uint8_t ds_selected;
@@ -250,6 +267,7 @@ OneWire oneWire(PIN_ONEWIRE);
 DallasTemperature ds(&oneWire);
 float ds_temperature;
 bool ds_temperature_ok = false;
+#endif
 
 // STEPPER MOTOR DEFINES
 // standard X25.168 range 315 degrees at 1/3 degree steps
@@ -303,10 +321,14 @@ void setup() {
   initDisplay();
   initEncoder();
   initBmp();
+#if USE_DS18B20
   initDs();
+#endif
+#if USE_SD
   initSd();
   //removeDataLogFile();
   initDataLogFile();
+#endif
   initWifi();
   //initTime();
   // initDht();
@@ -492,10 +514,12 @@ void loop() {
             updateAxes = true;
             updatePlot = true;
           }
+#if USE_SD
           if (newLogData && !messageSignActive) {
             updatePlot = true;
             newLogData = false;
           }
+#endif
           if (updateAxes) {
             plotAxes(plotHours[plotHoursIdx], plotTitle[plotVarsIdx]);
             updateAxes = false;
@@ -539,11 +563,13 @@ void loop() {
     forecastWeather();
     getTimeStamp();
     publishSensorDataToMQTT();
+#if USE_SD
     if (timeOk && millis() - lastLogMillis > LOG_INTERV_SEC * 1000 && logging) {
       logData();
       lastLogMillis = millis();
       //catFileSerial(DATA_LOG_FILE);
     }
+#endif
   }
 
   updateDialPos(motor1, dialStateTop);
@@ -585,6 +611,7 @@ void initDisplay() {
   display.cp437(true);                  // Use full 256 char 'Code Page 437' font
 }
 
+#if USE_SD
 void initDataLogFile() {
   if (!SD.exists(DATA_LOG_FILE)) {
     File dataFile = SD.open(DATA_LOG_FILE, FILE_WRITE);
@@ -606,7 +633,9 @@ void removeDataLogFile() {
     displayMessage(String(DATA_LOG_FILE) + " deleted");
   }
 }
+#endif
 
+#if USE_SD
 void initSd() {
   // SD CARD READER
   digitalWrite(PIN_SPI_CS_OLED, HIGH);
@@ -631,6 +660,7 @@ void initSd() {
     // }
   }
 }
+#endif
 
 void initEncoder() {
   // ROTARY ENCODER INTERRUPT
@@ -662,6 +692,7 @@ void initSerial() {
   // while (!Serial) {}
 }
 
+#if USE_DS18B20
 void initDs() {
   // DS18B20 INIT
   displayMessage("Initializing DS18B20");
@@ -670,6 +701,7 @@ void initDs() {
   ds.setWaitForConversion(true);
   ds.requestTemperatures();
 }
+#endif
 
 void zeroDials() {
   //motor1->setPosition(DIAL_RANGE_STEPS / 2);
@@ -699,7 +731,12 @@ void initSteppers() {
   // display.clearDisplay();
   // display.setCursor(0, 0);
 
+#if USE_SD
   readMotorPos();
+#else
+  storedDialPosTop = 0;
+  storedDialPosBottom = 0;
+#endif
 
   motor1->setCurrentStep(storedDialPosTop);
   //displayMessage("Top: " + String(storedDialPosTop));
@@ -836,11 +873,15 @@ void arbitrateSensorReadings() {
   for (int i = 0; i < avgSamplesTempOut - 1; ++i) {
     temperature_out_array[i] = temperature_out_array[i + 1];
   }
+#if USE_DS18B20
   if (ds_temperature > TEMP_PLAUS_MIN && ds_temperature < TEMP_PLAUS_MAX && ds_temperature_ok) {
     temperature_out_array[avgSamplesTempOut - 1] = ds_temperature;
   } else {
     temperature_out_array[avgSamplesTempOut - 1] = INVALID_NUMBER;
   }
+#else
+  temperature_out_array[avgSamplesTempOut - 1] = INVALID_NUMBER;
+#endif
   int avgSamples = 0;
   float sum = 0;
   for (int i = 0; i < avgSamplesTempOut; ++i) {
@@ -1021,6 +1062,7 @@ void readBmp() {
   bmp.getTemperature(&bmp_temperature);
 }
 
+#if USE_DS18B20
 void readDs() {
   //ds_temperature = ds.getTempC();
   ds.requestTemperatures();
@@ -1032,6 +1074,7 @@ void readDs() {
     ds_temperature_ok = true;
   }
 }
+#endif
 
 void readDht() {
   dht_temperature = dht22.getTemperature();
@@ -1049,7 +1092,9 @@ void readDht() {
 void readSensors() {
   readDht();
   readBmp();
+#if USE_DS18B20
   readDs();
+#endif
   lastSensorReadMillis = millis();
 }
 
@@ -1077,9 +1122,11 @@ void displaySensorReadings() {
   display.print(dht_humidity_rel);
   display.println(" %");
 
+#if USE_DS18B20
   display.print("Temp ds: ");
   display.print(ds_temperature);
   display.println(" C");
+#endif
 
   display.print("Encoder: ");
   display.print(encPos);
@@ -1122,6 +1169,7 @@ void displaySummary() {
   display.display();
 }
 
+#if USE_SD
 void listFiles(File dir, int numTabs) {
   while (true) {
     File entry = dir.openNextFile();
@@ -1144,7 +1192,9 @@ void listFiles(File dir, int numTabs) {
     entry.close();
   }
 }
+#endif
 
+#if USE_SD
 void catFileSerial(const char *path) {
   File file = SD.open(path, FILE_READ);
   if (file) {
@@ -1160,6 +1210,7 @@ void catFileSerial(const char *path) {
     Serial.println("Error opening " + String(path));
   }
 }
+#endif
 
 // Function to get date and time from NTPClient
 void getTimeStamp() {
@@ -1199,6 +1250,7 @@ void getTimeStamp() {
   }
 }
 
+#if USE_SD
 void logData() {
   // "Date,Time,TempIn,TempOut,TempPcb,HumidityIn,PressureIn"
   File file = SD.open(DATA_LOG_FILE, FILE_WRITE);
@@ -1222,7 +1274,9 @@ void logData() {
     displayMessage("Error writing " + String(DATA_LOG_FILE));
   }
 }
+#endif
 
+#if USE_SD
 void storeMotorPos() {
   File file = SD.open(DIAL_POS_FILE, FILE_WRITE);
   if (file) {
@@ -1234,7 +1288,9 @@ void storeMotorPos() {
     displayMessage("Error writing " + String(DIAL_POS_FILE));
   }
 }
+#endif
 
+#if USE_SD
 void readMotorPos() {
   File file = SD.open(DIAL_POS_FILE, FILE_READ);
   if (file) {
@@ -1249,6 +1305,7 @@ void readMotorPos() {
     displayMessage("Error reading " + String(DIAL_POS_FILE));
   }
 }
+#endif
 
 float map_float(float x, float in_min, float in_max, float out_min, float out_max) {
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
